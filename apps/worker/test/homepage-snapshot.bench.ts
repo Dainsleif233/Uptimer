@@ -12,7 +12,6 @@ import { handleError, handleNotFound } from '../src/middleware/errors';
 import { publicRoutes } from '../src/routes/public';
 import { buildHomepageRenderArtifact } from '../src/snapshots/public-homepage';
 import { createFakeD1Database, type FakeD1QueryHandler } from './helpers/fake-d1';
-import pageWorker from '../../web/public/_worker.js';
 
 type Scenario = {
   name: string;
@@ -26,18 +25,6 @@ type Sample = {
   monitorCount: number;
   heartbeatRows: number;
   rollupRows: number;
-};
-
-type RootMissScenario = {
-  name: string;
-  monitorCount: number;
-};
-
-type RootMissSample = {
-  elapsedMs: number;
-  artifactKB: number;
-  preloadKB: number;
-  snapshotKB: number;
 };
 
 type RouteReadScenario = {
@@ -55,14 +42,18 @@ const BENCH_LABEL = process.env.HOMEPAGE_BENCH_LABEL ?? 'current-working-tree';
 const OUTPUT_PATH = process.env.HOMEPAGE_BENCH_OUTPUT ?? null;
 
 const SCENARIOS: Scenario[] = [
-  { name: '1000 monitors / 30 heartbeats / 14 uptime days', monitorCount: 1000, heartbeatPoints: 30, uptimeDays: 14 },
-  { name: '5000 monitors / 30 heartbeats / 14 uptime days', monitorCount: 5000, heartbeatPoints: 30, uptimeDays: 14 },
-];
-
-const ROOT_MISS_SCENARIOS: RootMissScenario[] = [
-  { name: '50 monitors', monitorCount: 50 },
-  { name: '100 monitors', monitorCount: 100 },
-  { name: '250 monitors', monitorCount: 250 },
+  {
+    name: '1000 monitors / 30 heartbeats / 14 uptime days',
+    monitorCount: 1000,
+    heartbeatPoints: 30,
+    uptimeDays: 14,
+  },
+  {
+    name: '5000 monitors / 30 heartbeats / 14 uptime days',
+    monitorCount: 5000,
+    heartbeatPoints: 30,
+    uptimeDays: 14,
+  },
 ];
 
 const ROUTE_READ_SCENARIOS: RouteReadScenario[] = [
@@ -296,7 +287,10 @@ function buildSyntheticHomepagePayload(
       is_stale: false,
       last_checked_at: now - 30,
       heartbeat_strip: {
-        checked_at: Array.from({ length: heartbeatPoints }, (_, pointIndex) => now - (pointIndex + 1) * 60),
+        checked_at: Array.from(
+          { length: heartbeatPoints },
+          (_, pointIndex) => now - (pointIndex + 1) * 60,
+        ),
         status_codes: 'u'.repeat(heartbeatPoints),
         latency_ms: Array.from(
           { length: heartbeatPoints },
@@ -324,94 +318,12 @@ function buildSyntheticHomepagePayload(
   };
 }
 
-async function runOneRootMiss(scenario: RootMissScenario): Promise<RootMissSample> {
-  const now = 1_728_000_000;
-  const artifact = buildHomepageRenderArtifact(
-    buildSyntheticHomepagePayload(scenario.monitorCount, 30, 14, now),
-  );
-
-  const originalFetch = globalThis.fetch;
-  const originalCaches = globalThis.caches;
-
-  Object.defineProperty(globalThis, 'caches', {
-    configurable: true,
-    value: {
-      default: {
-        match: async () => null,
-        put: async () => undefined,
-      },
-    },
-  });
-
-  globalThis.fetch = (async () =>
-    new Response(JSON.stringify(artifact), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    })) as typeof fetch;
-
-  try {
-    const started = performance.now();
-    const response = await pageWorker.fetch(
-      new Request('https://status.example.com/', {
-        headers: { Accept: 'text/html' },
-      }),
-      {
-        UPTIMER_API_ORIGIN: 'https://api.example.com',
-        ASSETS: {
-          fetch: async () =>
-            new Response('<!doctype html><html><head><title>Uptimer</title></head><body><div id="root"></div></body></html>', {
-              status: 200,
-              headers: { 'Content-Type': 'text/html; charset=utf-8' },
-            }),
-        },
-      },
-      { waitUntil: () => undefined } as ExecutionContext,
-    );
-    await response.text();
-    const elapsedMs = performance.now() - started;
-
-    return {
-      elapsedMs,
-      artifactKB: Number((JSON.stringify(artifact).length / 1024).toFixed(1)),
-      preloadKB: Number((artifact.preload_html.length / 1024).toFixed(1)),
-      snapshotKB: Number(
-        (
-          (('snapshot_json' in artifact ? artifact.snapshot_json : JSON.stringify(artifact.snapshot))
-            .length / 1024)
-        ).toFixed(1),
-      ),
-    };
-  } finally {
-    globalThis.fetch = originalFetch;
-    Object.defineProperty(globalThis, 'caches', {
-      configurable: true,
-      value: originalCaches,
-    });
-  }
-}
-
-function summarizeRootMiss(scenario: RootMissScenario, samples: RootMissSample[]) {
-  const elapsed = samples.map((sample) => sample.elapsedMs).sort((a, b) => a - b);
-  const totalElapsed = elapsed.reduce((sum, value) => sum + value, 0);
-  const first = samples[0];
-
-  return {
-    scenario: scenario.name,
-    runs: samples.length,
-    meanMs: Number((totalElapsed / samples.length).toFixed(3)),
-    medianMs: Number(percentile(elapsed, 0.5).toFixed(3)),
-    p95Ms: Number(percentile(elapsed, 0.95).toFixed(3)),
-    artifactKB: first?.artifactKB ?? 0,
-    preloadKB: first?.preloadKB ?? 0,
-    snapshotKB: first?.snapshotKB ?? 0,
-  };
-}
-
 async function runOneRouteRead(scenario: RouteReadScenario): Promise<RouteReadSample> {
   const now = Math.floor(Date.now() / 1000);
   const payload = buildSyntheticHomepagePayload(scenario.monitorCount, 30, 14, now);
   const artifact = buildHomepageRenderArtifact(payload);
-  const bodyJson = scenario.endpoint === 'homepage' ? JSON.stringify(payload) : JSON.stringify(artifact);
+  const bodyJson =
+    scenario.endpoint === 'homepage' ? JSON.stringify(payload) : JSON.stringify(artifact);
   const key = scenario.endpoint === 'homepage' ? 'homepage' : 'homepage:artifact';
   const originalCaches = globalThis.caches;
 
@@ -488,7 +400,6 @@ describe('homepage snapshot benchmark', () => {
   it('measures homepage snapshot compute cost', async () => {
     const rows = [];
     const artifactRows = [];
-    const rootMissRows = [];
     const routeReadRows = [];
 
     for (const scenario of SCENARIOS) {
@@ -517,19 +428,6 @@ describe('homepage snapshot benchmark', () => {
       artifactRows.push(summarize(scenario, samples));
     }
 
-    for (const scenario of ROOT_MISS_SCENARIOS) {
-      for (let index = 0; index < WARMUP_RUNS; index += 1) {
-        await runOneRootMiss(scenario);
-      }
-
-      const samples: RootMissSample[] = [];
-      for (let index = 0; index < MEASURE_RUNS; index += 1) {
-        samples.push(await runOneRootMiss(scenario));
-      }
-
-      rootMissRows.push(summarizeRootMiss(scenario, samples));
-    }
-
     for (const scenario of ROUTE_READ_SCENARIOS) {
       for (let index = 0; index < WARMUP_RUNS; index += 1) {
         await runOneRouteRead(scenario);
@@ -556,9 +454,6 @@ describe('homepage snapshot benchmark', () => {
     console.log('Homepage artifact bootstrap compute benchmark');
     console.table(artifactRows);
     console.log('');
-    console.log('Pages homepage root miss benchmark');
-    console.table(rootMissRows);
-    console.log('');
     console.log('Worker homepage route read benchmark');
     console.table(routeReadRows);
 
@@ -569,7 +464,6 @@ describe('homepage snapshot benchmark', () => {
           {
             snapshotCompute: rows,
             artifactCompute: artifactRows,
-            rootMiss: rootMissRows,
             routeRead: routeReadRows,
           },
           null,

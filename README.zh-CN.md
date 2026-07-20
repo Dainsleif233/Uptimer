@@ -8,7 +8,7 @@
 [![Deploy](https://github.com/VrianCao/Uptimer/actions/workflows/deploy.yml/badge.svg)](https://github.com/VrianCao/Uptimer/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-监控你的服务，向访客展示实时状态，并在服务异常时发送通知 — 全部运行在 Cloudflare Workers + Pages + D1 上，零运维。
+监控你的服务，向访客展示实时状态，并在服务异常时发送通知 — 全部运行在 Cloudflare Workers + D1 上，零运维。
 
 [快速部署](#快速部署5-步完成) · [本地开发](#本地开发) · [文档](#文档) · [贡献指南](CONTRIBUTING.zh-CN.md)
 
@@ -22,7 +22,7 @@
 
 - **零运维** — 无需管理服务器、容器或数据库。完全运行在 Cloudflare 的免费/付费套餐上。
 - **边缘原生** — 监控探针从 Cloudflare Workers 发起，状态页由 CDN 边缘节点分发。
-- **一键部署** — 推送到 `main` 分支，GitHub Actions 自动完成：D1 迁移、Worker 部署、Pages 构建。
+- **一键部署** — 推送到 `main` 分支，GitHub Actions 自动完成：D1 迁移与单次 Worker 部署（前端 + API 一起）。
 - **功能完整** — HTTP/TCP 探测、事件管理、维护窗口、Webhook 通知、管理后台。
 
 ## 功能特性
@@ -67,16 +67,18 @@
                 ┌──────────────────────────────────────────┐
                 │            Cloudflare Network            │
                 │                                          │
-Visitors ──────►│  Pages (React SPA)                       │
+Visitors ──────►│  Worker (React SPA 静态资源)             │
                 │      │                                   │
-                │      ▼                                   │
-Admin ─────────►│  Workers (Hono API)                      │
+Admin ─────────►│      │  /api/v1/*  →  Hono API           │
                 │      │              │                    │
                 │      ▼              ▼                    │
-                │    D1 DB      Cron Triggers              │
-                │              (scheduled probes)          │
-                │                     │                    │
-                └─────────────────────┼────────────────────┘
+                │    static        Cron Triggers          │
+                │    assets       (scheduled probes)      │
+                │      │              │                    │
+                │      ▼              ▼                    │
+                │    D1 DB ◄─────────┘                    │
+                │                                          │
+                └─────────────────────┬────────────────────┘
                                       │
                                       ▼
                            Target Services (HTTP/TCP)
@@ -85,6 +87,8 @@ Admin ─────────►│  Workers (Hono API)                     
                               Webhooks ──► Discord / Slack / ntfy
 ```
 
+前端（状态页 + 管理后台）与 API 部署为**同一个 Cloudflare Worker**。构建好的 SPA 作为 Worker 的静态资源上传，状态页、管理后台与 API 共用同一个域名。
+
 ## 技术栈
 
 | 层级   | 技术                                                               |
@@ -92,7 +96,7 @@ Admin ─────────►│  Workers (Hono API)                     
 | 前端   | React 18, Vite, TypeScript, Tailwind CSS, TanStack Query, Recharts |
 | 后端   | Cloudflare Workers, Hono, Zod                                      |
 | 数据库 | Cloudflare D1 (SQLite), Drizzle ORM                                |
-| 托管   | Cloudflare Pages（前端）、Workers（API）                           |
+| 托管   | Cloudflare Workers（前端静态资源 + API，同一域名）                |
 | CI/CD  | GitHub Actions                                                     |
 | 包管理 | pnpm（monorepo）                                                   |
 
@@ -109,7 +113,6 @@ Admin ─────────►│  Workers (Hono API)                     
 1. 前往 [Cloudflare Dashboard → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
 2. 点击 **Create Token** → 使用 **Edit Cloudflare Workers** 模板
 3. 添加以下权限：
-   - `Account / Cloudflare Pages / Edit`
    - `Account / D1 / Edit`
    - `Account / Account Settings / Read`
 4. 复制生成的 Token
@@ -131,17 +134,16 @@ Admin ─────────►│  Workers (Hono API)                     
 工作流会自动完成：
 
 - 创建 D1 数据库并执行迁移
-- 部署 Worker（API + 定时监控任务）
-- 构建并部署 Pages 前端（状态页）
+- 构建前端（Vite），与 API 一起部署为同一个 Worker（SPA 作为 Worker 的静态资源上传）
 - 注入管理密钥为 Worker Secret
 
 ### 第 5 步 — 访问你的状态页
 
 工作流运行成功后（首次部署通常约 2 分钟）：
 
-- **状态页** → `https://<你的仓库名>.pages.dev`
-- **管理后台** → `https://<你的仓库名>.pages.dev/admin`
-- **API** → `https://<你的仓库名>.workers.dev/api/v1/public/status`
+- **状态页** → `https://<你的-worker-名>.workers.dev`
+- **管理后台** → `https://<你的-worker-名>.workers.dev/admin`
+- **API** → `https://<你的-worker-名>.workers.dev/api/v1/public/status`
 
 使用你设置的 `UPTIMER_ADMIN_TOKEN` 登录管理后台，即可开始添加监控项。
 

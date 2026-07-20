@@ -12,7 +12,7 @@ Source: `.github/workflows/deploy.yml`
 
 | Name                    | Required         | Description                                                                      |
 | ----------------------- | ---------------- | -------------------------------------------------------------------------------- |
-| `CLOUDFLARE_API_TOKEN`  | Yes              | Cloudflare API authentication (deploy Worker/Pages, manage D1)                   |
+| `CLOUDFLARE_API_TOKEN`  | Yes              | Cloudflare API authentication (deploy Worker, manage D1)                        |
 | `CLOUDFLARE_ACCOUNT_ID` | No (recommended) | Cloudflare Account ID; auto-resolved if not provided                             |
 | `UPTIMER_ADMIN_TOKEN`   | Yes              | Admin dashboard access key; written to Worker Secret `ADMIN_TOKEN` automatically |
 | `VITE_ADMIN_PATH`       | No               | Override admin dashboard path (takes priority over variable)                     |
@@ -23,15 +23,12 @@ Source: `.github/workflows/deploy.yml`
 | ----------------------- | ------------------------- | -------------------------------------------------- |
 | `UPTIMER_PREFIX`        | Repository name slug      | Unified resource name prefix                       |
 | `UPTIMER_WORKER_NAME`   | `${UPTIMER_PREFIX}`       | Worker name                                        |
-| `UPTIMER_PAGES_PROJECT` | `${UPTIMER_PREFIX}`       | Pages project name                                 |
 | `UPTIMER_D1_NAME`       | `${UPTIMER_PREFIX}`       | D1 database name                                   |
 | `UPTIMER_D1_BINDING`    | `DB`                      | D1 binding name in Worker                          |
-| `UPTIMER_API_BASE`      | Auto-derived or `/api/v1` | API address (e.g. `https://my-worker.example.com/api/v1` or `/api/v1`) |
-| `UPTIMER_API_ORIGIN`    | Auto-derived              | API origin (e.g. `https://my-worker.example.com`); `/api/v1` appended automatically |
 | `VITE_ADMIN_PATH`       | —                         | Admin dashboard path (overridden by Secret if set) |
 | `UPTIMER_ADMIN_PATH`    | —                         | Fallback variable for `VITE_ADMIN_PATH`            |
 
-> **API address**: Usually no configuration needed — the workflow detects the Worker URL automatically. Set `UPTIMER_API_BASE` or `UPTIMER_API_ORIGIN` only if the API is on a custom domain. Both accept the same information in different formats; setting one is enough.
+> **API address**: No configuration needed — the frontend and API share the same origin (the Worker URL), so the SPA calls `/api/v1` relative to itself.
 
 ## 2. Worker Runtime
 
@@ -59,7 +56,7 @@ Source: `apps/web/.env.example`
 | `VITE_ADMIN_PATH` | `/admin`  | Admin dashboard route prefix       |
 | `VITE_API_BASE`   | `/api/v1` | API base URL for frontend requests |
 
-> `VITE_API_BASE` is injected by the deploy workflow from `UPTIMER_API_BASE`, `UPTIMER_API_ORIGIN`, or the Worker URL. Falls back to `/api/v1` if none are available.
+> `VITE_API_BASE` defaults to the same-origin `/api/v1`, which is correct now that the frontend and API are served from one Worker. You only need to override it if you split the frontend onto a different origin.
 
 ## 4. Runtime Settings (D1)
 

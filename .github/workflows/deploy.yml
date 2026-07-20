@@ -65,20 +65,23 @@ jobs:
       # 2) The defaults below derive from the fork repository name (lowercased),
       #    so they remain stable across upstream syncs.
       #
+      # The frontend and API are deployed together as a single Worker. The built
+      # SPA (apps/web/dist) is uploaded as the Worker's static assets, so the
+      # status page, admin dashboard, and API all share one origin. There is no
+      # separate Pages project and no cross-origin API base to configure.
+      #
       # Required secrets:
       # - CLOUDFLARE_API_TOKEN: Cloudflare API Token with permissions for
-      #   Workers, Pages and D1.
+      #   Workers and D1.
       #
       # Optional (recommended) secret/variable:
       # - CLOUDFLARE_ACCOUNT_ID: If not provided, we will fetch the first account
       #   id accessible by the token.
       #
       # Optional variables (recommended to avoid collisions if you deploy multiple instances):
-      # - UPTIMER_PREFIX: Base name for Worker/Pages/D1. Defaults to repo name slug.
-      # - UPTIMER_WORKER_NAME / UPTIMER_PAGES_PROJECT / UPTIMER_D1_NAME: Override individual names.
+      # - UPTIMER_PREFIX: Base name for Worker/D1. Defaults to repo name slug.
+      # - UPTIMER_WORKER_NAME / UPTIMER_D1_NAME: Override individual names.
       # - UPTIMER_D1_BINDING: D1 binding name in Worker (default: DB).
-      # - UPTIMER_API_BASE / UPTIMER_API_ORIGIN: Either one can be set; workflow derives the other.
-      #   (API_BASE drives Vite build requests; API_ORIGIN drives Pages HTML preload worker.)
       #
       # Required secret:
       # - UPTIMER_ADMIN_TOKEN: Admin dashboard access key; written to Worker secret ADMIN_TOKEN.
@@ -124,25 +127,21 @@ jobs:
 
           prefix="${UPTIMER_PREFIX:-$default_slug}"
           worker_name="${UPTIMER_WORKER_NAME:-$prefix}"
-          pages_project="${UPTIMER_PAGES_PROJECT:-$prefix}"
           d1_name="${UPTIMER_D1_NAME:-$prefix}"
           d1_binding="${UPTIMER_D1_BINDING:-DB}"
 
           echo "WORKER_NAME=$worker_name" >> "$GITHUB_ENV"
-          echo "PAGES_PROJECT=$pages_project" >> "$GITHUB_ENV"
           echo "D1_NAME=$d1_name" >> "$GITHUB_ENV"
           echo "D1_BINDING=$d1_binding" >> "$GITHUB_ENV"
           echo "DEFAULT_BRANCH=${DEFAULT_BRANCH:-main}" >> "$GITHUB_ENV"
 
           echo "worker_name=$worker_name" >> "$GITHUB_OUTPUT"
-          echo "pages_project=$pages_project" >> "$GITHUB_OUTPUT"
           echo "d1_name=$d1_name" >> "$GITHUB_OUTPUT"
           echo "d1_binding=$d1_binding" >> "$GITHUB_OUTPUT"
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           UPTIMER_PREFIX: ${{ vars.UPTIMER_PREFIX }}
           UPTIMER_WORKER_NAME: ${{ vars.UPTIMER_WORKER_NAME }}
-          UPTIMER_PAGES_PROJECT: ${{ vars.UPTIMER_PAGES_PROJECT }}
           UPTIMER_D1_NAME: ${{ vars.UPTIMER_D1_NAME }}
           UPTIMER_D1_BINDING: ${{ vars.UPTIMER_D1_BINDING }}
 
@@ -248,7 +247,7 @@ jobs:
 
               header_end = block.find("\n")
               if header_end == -1:
-                  return block + f'\n{key} = "{value}"\n'
+                  return block + f'{key} = "{value}"\n'
               return block[: header_end + 1] + f'{key} = "{value}"\n' + block[header_end + 1 :]
 
           replaced = False
@@ -288,13 +287,20 @@ jobs:
           set -euo pipefail
           pnpm exec wrangler d1 migrations apply "$D1_NAME" --remote --config "$WRANGLER_CI_CONFIG"
 
+      - name: Build Web (Vite)
+        working-directory: apps/web
+        run: pnpm build
+        env:
+          VITE_ADMIN_PATH: ${{ env.VITE_ADMIN_PATH }}
+
       - name: Deploy Worker (idempotent)
         id: deploy_worker
         shell: bash
         working-directory: apps/worker
         run: |
           set -euo pipefail
-          # Capture output so we can derive workers.dev URL for the web build (optional).
+          # The Worker deploy uploads the built SPA (apps/web/dist) as static
+          # assets alongside the API, so frontend + API ship in one unit.
           set +e
           deploy_out="$(pnpm exec wrangler deploy --config "$WRANGLER_CI_CONFIG" --keep-vars 2>&1)"
           deploy_code="$?"
@@ -304,7 +310,7 @@ jobs:
             exit "$deploy_code"
           fi
 
-          # Best-effort parse; if it fails we can still use a user-provided API base.
+          # Best-effort parse of the deployed URL for the warm-up step below.
           worker_url="$(echo "$deploy_out" | grep -oE 'https://[^ ]+[.]workers[.]dev' | head -n1 || true)"
           if [[ -n "$worker_url" ]]; then
             echo "WORKER_URL=$worker_url" >> "$GITHUB_ENV"
@@ -328,128 +334,3 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$UPTIMER_ADMIN_TOKEN" | pnpm exec wrangler secret put ADMIN_TOKEN --name "$WORKER_NAME" --config "$WRANGLER_CI_CONFIG"
-
-      - name: Resolve API base + origin (for Vite build + Pages preload)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          trim_trailing_slashes() {
-            local value="$1"
-            while [[ "$value" == */ ]]; do
-              value="${value%/}"
-            done
-            printf '%s' "$value"
-          }
-
-          derive_api_base_from_origin() {
-            local origin="$1"
-            local trimmed
-            trimmed="$(trim_trailing_slashes "$origin")"
-            if [[ "$trimmed" == */api/v1 ]]; then
-              printf '%s' "$trimmed"
-            else
-              printf '%s/api/v1' "$trimmed"
-            fi
-          }
-
-          if [[ -n "${UPTIMER_API_BASE:-}" ]]; then
-            api_base="$UPTIMER_API_BASE"
-          elif [[ -n "${UPTIMER_API_ORIGIN:-}" ]]; then
-            api_base="$(derive_api_base_from_origin "$UPTIMER_API_ORIGIN")"
-          elif [[ -n "${WORKER_URL:-}" ]]; then
-            api_base="${WORKER_URL}/api/v1"
-          else
-            api_base="/api/v1"
-          fi
-
-          api_origin=""
-          if [[ -n "${UPTIMER_API_ORIGIN:-}" ]]; then
-            api_origin="$UPTIMER_API_ORIGIN"
-          elif [[ -n "${UPTIMER_API_BASE:-}" ]]; then
-            if [[ "$UPTIMER_API_BASE" =~ ^https?://[^/]+ ]]; then
-              api_origin="${BASH_REMATCH[0]}"
-            fi
-            if [[ -z "$api_origin" && -n "${WORKER_URL:-}" ]]; then
-              api_origin="$WORKER_URL"
-            fi
-          elif [[ -n "${WORKER_URL:-}" ]]; then
-            api_origin="$WORKER_URL"
-          fi
-
-          if [[ -n "${UPTIMER_API_BASE:-}" && -n "${UPTIMER_API_ORIGIN:-}" ]]; then
-            implied_base="$(derive_api_base_from_origin "$UPTIMER_API_ORIGIN")"
-            if [[ "$UPTIMER_API_BASE" != "$implied_base" ]]; then
-              echo "::warning::UPTIMER_API_BASE and UPTIMER_API_ORIGIN resolve to different API bases. UPTIMER_API_BASE wins for web build."
-            fi
-          fi
-
-          echo "Using VITE_API_BASE=$api_base"
-          echo "VITE_API_BASE=$api_base" >> "$GITHUB_ENV"
-          echo "UPTIMER_RESOLVED_API_BASE=$api_base" >> "$GITHUB_ENV"
-
-          if [[ -n "$api_origin" ]]; then
-            echo "Using UPTIMER_API_ORIGIN=$api_origin"
-            echo "UPTIMER_RESOLVED_API_ORIGIN=$api_origin" >> "$GITHUB_ENV"
-          fi
-        env:
-          UPTIMER_API_BASE: ${{ vars.UPTIMER_API_BASE }}
-          UPTIMER_API_ORIGIN: ${{ vars.UPTIMER_API_ORIGIN }}
-          WORKER_URL: ${{ steps.deploy_worker.outputs.worker_url }}
-
-      - name: Build Pages (Vite)
-        working-directory: apps/web
-        run: pnpm build
-
-      - name: Ensure Pages project exists (idempotent)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          set +e
-          output="$(pnpm -C apps/worker exec wrangler --cwd ../.. pages project create "$PAGES_PROJECT" --production-branch "$DEFAULT_BRANCH" 2>&1)"
-          code="$?"
-          set -e
-
-          if [[ "$code" -eq 0 ]]; then
-            echo "Created Pages project: $PAGES_PROJECT"
-            exit 0
-          fi
-
-          if echo "$output" | grep -qiE "already exists|already a project"; then
-            echo "Pages project already exists: $PAGES_PROJECT"
-            exit 0
-          fi
-
-          # Fallback: if the error message format changes, verify via listing.
-          if pnpm -C apps/worker exec wrangler --cwd ../.. pages project list 2>/dev/null | grep -q "$PAGES_PROJECT"; then
-            echo "Pages project already exists: $PAGES_PROJECT"
-            exit 0
-          fi
-
-          echo "$output"
-          exit "$code"
-
-      - name: Upsert Pages secret for HTML preload (best-effort)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          api_origin="${UPTIMER_RESOLVED_API_ORIGIN:-}"
-          if [[ -z "$api_origin" ]]; then
-            echo "Skipping Pages secret: no UPTIMER_API_ORIGIN / absolute UPTIMER_API_BASE / WORKER_URL"
-            exit 0
-          fi
-
-          printf %s "$api_origin" | pnpm -C apps/worker exec wrangler --cwd ../.. pages secret put UPTIMER_API_ORIGIN --project-name "$PAGES_PROJECT"
-
-      - name: Deploy Pages (idempotent)
-        shell: bash
-        run: |
-          set -euo pipefail
-          pnpm -C apps/worker exec wrangler --cwd ../.. pages deploy apps/web/dist \
-            --project-name "$PAGES_PROJECT" \
-            --branch "$DEFAULT_BRANCH" \
-            --commit-hash "$GITHUB_SHA" \
-            --commit-message "$GITHUB_SHA" \
-            --commit-dirty=true

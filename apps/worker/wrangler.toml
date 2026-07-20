@@ -19,6 +19,16 @@ database_name = "uptimer"
 # Replace with your real D1 database_id for remote/preview usage.
 database_id = "00000000-0000-0000-0000-000000000000"
 
+# The built frontend (apps/web/dist) is served as static assets from this Worker,
+# so the status page, admin dashboard, and API all share one origin.
+# - `run_worker_first = ["/api/*"]` routes every API request through the Worker;
+#   all other paths are served as static assets, with SPA fallback to index.html
+#   for browser navigations (e.g. /admin, /history/incidents).
+[assets]
+directory = "../web/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
 # Keep this table even if empty so `wrangler dev` loads secrets/vars from `.dev.vars`.
 [vars]
 ADMIN_RATE_LIMIT_MAX = "60"

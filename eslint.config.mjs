@@ -15,7 +15,6 @@ export default [
       '**/coverage/**',
       // Pages runtime files (service worker env) are not linted as browser/node.
       'apps/web/public/**',
-      'apps/web/functions/**',
     ],
   },
   js.configs.recommended,
