@@ -12,7 +12,7 @@ Uptimer 所有可配置参数，按部署时、运行时、本地开发分类。
 
 | 名称                    | 必需       | 说明                                                   |
 | ----------------------- | ---------- | ------------------------------------------------------ |
-| `CLOUDFLARE_API_TOKEN`  | 是         | Cloudflare API 认证（部署 Worker/Pages、管理 D1）      |
+| `CLOUDFLARE_API_TOKEN`  | 是         | Cloudflare API 认证（部署 Worker、管理 D1）            |
 | `CLOUDFLARE_ACCOUNT_ID` | 否（推荐） | Cloudflare Account ID；未提供时工作流尝试自动解析      |
 | `UPTIMER_ADMIN_TOKEN`   | 是         | 管理面板访问密钥；自动写入 Worker Secret `ADMIN_TOKEN` |
 | `VITE_ADMIN_PATH`       | 否         | 覆盖管理后台路径（优先级高于 Variable）                |
@@ -23,15 +23,12 @@ Uptimer 所有可配置参数，按部署时、运行时、本地开发分类。
 | ----------------------- | -------------------- | ------------------------------------------- |
 | `UPTIMER_PREFIX`        | 仓库名 slug          | 统一资源名前缀                              |
 | `UPTIMER_WORKER_NAME`   | `${UPTIMER_PREFIX}`  | Worker 名称                                 |
-| `UPTIMER_PAGES_PROJECT` | `${UPTIMER_PREFIX}`  | Pages 项目名                                |
 | `UPTIMER_D1_NAME`       | `${UPTIMER_PREFIX}`  | D1 数据库名                                 |
 | `UPTIMER_D1_BINDING`    | `DB`                 | Worker 中 D1 binding 名称                   |
-| `UPTIMER_API_BASE`      | 自动推导或 `/api/v1` | API 地址（如 `https://my-worker.example.com/api/v1` 或 `/api/v1`） |
-| `UPTIMER_API_ORIGIN`    | 自动推导             | API 源地址（如 `https://my-worker.example.com`）；自动拼接 `/api/v1` |
 | `VITE_ADMIN_PATH`       | —                    | 管理后台路径（可被 Secret 覆盖）            |
 | `UPTIMER_ADMIN_PATH`    | —                    | 兼容变量名（`VITE_ADMIN_PATH` 的 fallback） |
 
-> **API 地址**：通常无需配置——工作流会自动从 Worker URL 推导。仅当 API 使用自定义域名时，设置 `UPTIMER_API_BASE` 或 `UPTIMER_API_ORIGIN` 其中一个即可，两者只是格式不同。
+> **API 地址**：无需配置——前端与 API 共用同一个来源（Worker URL），SPA 以相对路径调用 `/api/v1`。
 
 ## 2. Worker 运行时
 
@@ -59,7 +56,7 @@ Uptimer 所有可配置参数，按部署时、运行时、本地开发分类。
 | `VITE_ADMIN_PATH` | `/admin`  | 管理后台路由前缀        |
 | `VITE_API_BASE`   | `/api/v1` | 前端访问 API 的基础 URL |
 
-> `VITE_API_BASE` 由部署工作流自动注入，来源依次为 `UPTIMER_API_BASE`、`UPTIMER_API_ORIGIN`、Worker URL，均不可用时回退为 `/api/v1`。
+> `VITE_API_BASE` 默认为同源的 `/api/v1`，前端与 API 由同一个 Worker 提供时即正确。仅当把前端拆分到不同来源时才需要覆盖。
 
 ## 4. 运行时设置（D1）
 

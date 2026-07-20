@@ -22,7 +22,7 @@
 - 不要把 `X-Uptimer-Trace-Token` 写进公开文档、Issue、PR、聊天记录或测试 fixture。
 - `wrangler tail` 与 Trace 响应可能包含请求 URL、query、header、错误信息和内部路径标签；分享前必须脱敏。
 - 需要保存原始 tail/trace 输出时，放入 gitignored 的 `tmp/` 或其他本地临时目录，不要提交。
-- 示例命令只能使用占位符，例如 `<your-worker-origin>`、`<your-pages-origin>`、`<token>`。
+- 示例命令只能使用占位符，例如 `<your-worker-origin>`、`<token>`。
 
 ---
 
@@ -82,12 +82,12 @@ pnpm --filter @uptimer/worker exec wrangler tail uptimer --format json --samplin
 
 ### 2.1 Header 协议（请求端）
 
-所有 trace 都基于这组 header（Workers 与 Pages Worker 一致）：
+所有 trace 都基于这组 header（仅由 Worker 处理，前端与 API 同源）：
 
 - `X-Uptimer-Trace: 1|true|yes|on`：开启 trace（默认关闭）
 - `X-Uptimer-Trace-Id: <id>`：可选；用于跨层关联（不传会自动生成 UUID）
 - `X-Uptimer-Trace-Token: <token>`：可选；若环境变量设置了 token，则必须匹配才启用
-- `X-Uptimer-Trace-Mode: <mode>`：可选；目前 Pages Worker 支持 `bypass-cache`
+- `X-Uptimer-Trace-Mode: <mode>`：可选；目前 Worker 支持 `bypass-cache`
 
 注意：
 
@@ -110,7 +110,6 @@ Token 的环境变量（两处都支持）：
 span 前缀约定：
 
 - Worker API（TS Worker）：通常以 `w_` 前缀输出（由调用方传入 prefix）
-- Pages Worker（`apps/web/public/_worker.js`）：以 `p_` 表示页面层 span，并把 API 的 `Server-Timing` 重命名为 `api_*` 合并进来，方便端到端阅读
 - span 名和标签只应表达执行路径、cache 命中、age、payload 形态等低敏信息；不要写入 token、header 原文、完整目标 URL 或用户输入。
 
 ---
@@ -140,28 +139,13 @@ curl -sS -D - -o /dev/null \
 
 ---
 
-## 4. Pages Worker（HTML 注入层）的 Trace 实现位置
+## 4. 前端首屏数据注入（历史实现，已移除）
 
-- Pages Worker：`apps/web/public/_worker.js`
-- 行为：
-  - 当 HTML 导航请求携带 `X-Uptimer-Trace`（且 token 校验通过）时：
-    - Pages Worker 会在自身逻辑中记录 `p_*` span（cache 命中、index fetch、API fetch、注入等）
-    - 同时把同一组 trace header 转发到 API（用于拿到 API 的 `Server-Timing` + `X-Uptimer-Trace`）
-    - 最终把 API 的 timing 合并成 `api_*` 输出到页面响应
-  - `X-Uptimer-Trace-Mode: bypass-cache`：
-    - Pages Worker 会跳过 `caches.default.match` 与 `caches.default.put`
-    - 适合定位“真实注入成本”，避免缓存把问题掩盖
+历史架构中存在一个 Pages Worker（`apps/web/public/_worker.js`）在 HTML 导航时注入预计算 homepage artifact，并用 `p_*` span 记录注入链路。现在前端与 API 已合并到同一个 Worker（前端作为 `[assets]` 静态资源），该注入层已移除：
 
-使用示例（直接观测 HTML 注入链路）：
-
-```bash
-curl -sS -D - -o /dev/null \
-  -H 'Accept: text/html' \
-  -H 'X-Uptimer-Trace: 1' \
-  -H 'X-Uptimer-Trace-Token: <token>' \
-  -H 'X-Uptimer-Trace-Mode: bypass-cache' \
-  'https://<your-pages-origin>/'
-```
+- 首屏数据由前端运行时通过 `/api/v1/public/homepage`（或 `/status`）获取，并带 localStorage 缓存兜底（见 `apps/web/src/main.tsx`、`apps/web/src/api/client.ts`）。
+- 不再有页面层 `p_*` span；端到端观测只看 Worker 的 `w_*` span。
+- `X-Uptimer-Trace-Mode: bypass-cache` 仍由 Worker 的热路径支持（跳过 Cache API 命中/回写）。
 
 ---
 
@@ -180,7 +164,6 @@ curl -sS -D - -o /dev/null \
 
 ## 6. 常见误区（已踩坑总结）
 
-- **把 Pages Worker 当作“免费搬运层”**：Pages Worker 的 CPU 也计入指标，热路径逻辑会直接推高 P50/P90
 - **在热路径里做“顺手回写/协调”**：即使“顺手”，也可能成为性能税
 - **bench 变快 ≠ Metrics 变快**：在 Cloudflare 的真实链路中，协调/解析/比较的 CPU 往往比“纯计算”更贵
 - **Trace 默认开**：会造成性能税与潜在信息泄露；必须默认关闭、可 token gate、只在必要路径启用

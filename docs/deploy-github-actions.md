@@ -21,13 +21,14 @@ Deploy Uptimer to Cloudflare using the built-in GitHub Actions workflow.
 
 1. Install Node + pnpm + dependencies
 2. Resolve Cloudflare Account ID (reads from config, falls back to API query)
-3. Compute resource names (Worker / Pages / D1)
+3. Compute resource names (Worker / D1)
 4. Check or create D1 database, inject real `database_id` into temp `wrangler.ci.toml`
 5. Run remote D1 migrations
-6. Deploy Worker
-7. (Optional) Write Worker Secret: `ADMIN_TOKEN`
-8. Build and deploy Pages
-9. (Optional) Write Pages Secret: `UPTIMER_API_ORIGIN`
+6. Build the frontend (Vite) into `apps/web/dist`
+7. Deploy the Worker — uploads the built SPA as static assets alongside the API
+8. (Optional) Write Worker Secret: `ADMIN_TOKEN`
+
+The frontend and API ship as a single Worker, so there is no separate Pages project and no cross-origin API base to configure.
 
 ## Configuration
 
@@ -46,22 +47,19 @@ Deploy Uptimer to Cloudflare using the built-in GitHub Actions workflow.
 
 ### Optional Variables
 
-Override default naming and routing:
+Override default naming:
 
 | Name                                     | Default                   | Description                  |
 | ---------------------------------------- | ------------------------- | ---------------------------- |
 | `UPTIMER_PREFIX`                         | Repository name slug      | Unified resource name prefix |
 | `UPTIMER_WORKER_NAME`                    | `${UPTIMER_PREFIX}`       | Worker name                  |
-| `UPTIMER_PAGES_PROJECT`                  | `${UPTIMER_PREFIX}`       | Pages project name           |
 | `UPTIMER_D1_NAME`                        | `${UPTIMER_PREFIX}`       | D1 database name             |
 | `UPTIMER_D1_BINDING`                     | `DB`                      | D1 binding name in Worker    |
-| `UPTIMER_API_BASE`                       | Auto-derived or `/api/v1` | API address (e.g. `https://my-worker.example.com/api/v1` or `/api/v1`) |
-| `UPTIMER_API_ORIGIN`                     | Auto-derived              | API origin (e.g. `https://my-worker.example.com`); `/api/v1` appended automatically |
 | `VITE_ADMIN_PATH` / `UPTIMER_ADMIN_PATH` | —                         | Custom admin dashboard path  |
 
 > If no naming variables are set, the workflow uses the repository name slug as the default prefix. This keeps names stable across forks.
 >
-> **API address**: Usually no configuration needed — the workflow detects the Worker URL automatically. Set `UPTIMER_API_BASE` or `UPTIMER_API_ORIGIN` only if the API is on a custom domain. Both accept the same information in different formats; setting one is enough.
+> **API address**: No configuration needed — the frontend and API share the same origin (the Worker URL), so the SPA calls `/api/v1` relative to itself.
 
 ## Cloudflare Token Permissions
 
@@ -69,7 +67,6 @@ The workflow creates and updates multiple resources. Your token needs:
 
 - Workers Scripts: deploy and manage secrets
 - D1: query, create, and migrate databases
-- Pages: create projects and deploy
 - Account: read account info (for account ID resolution)
 
 ## First Deployment
@@ -79,13 +76,13 @@ The workflow creates and updates multiple resources. Your token needs:
 3. Add `CLOUDFLARE_ACCOUNT_ID` (recommended)
 4. (Optional) Set `UPTIMER_PREFIX` to avoid name collisions
 5. Push to `master`/`main`, or manually trigger "Deploy to Cloudflare"
-6. Once the workflow succeeds, note the Worker URL and Pages URL from the logs
+6. Once the workflow succeeds, note the Worker URL from the logs — the status page, admin dashboard, and API all live on that one origin
 
 ## Post-deployment Verification
 
 ### Check the Status Page
 
-- Visit the Pages URL (public status page)
+- Visit the Worker URL (public status page)
 - Navigate to `/admin` (or your custom `VITE_ADMIN_PATH`)
 
 ### Test the API
@@ -120,11 +117,11 @@ monitors, monitor_state, check_results, outages, settings
 - Check that `UPTIMER_D1_BINDING` matches the binding in `apps/worker/wrangler.toml`
 - Verify migration SQL is idempotent and syntactically correct
 
-### Pages builds but API returns 404 or HTML
+### Static assets or SPA routes return 404
 
-- Verify that `UPTIMER_API_BASE` or `UPTIMER_API_ORIGIN` points to your Worker, not to the Pages site
-- "API returned HTML instead of JSON" usually means the URL is hitting Pages (which returns HTML) instead of the Worker
-- If neither variable is set, the workflow uses the Worker URL automatically — check that it resolved correctly in the deploy logs
+- Confirm the `Build Web (Vite)` step produced `apps/web/dist` before the `Deploy Worker` step ran
+- Confirm `apps/worker/wrangler.toml` has the `[assets]` block pointing at `../web/dist` with `not_found_handling = "single-page-application"`
+- Deep links like `/admin` rely on the SPA fallback; they only work through the deployed Worker (in local dev, use the Vite server on `:5173`)
 
 ### Admin returns 401
 

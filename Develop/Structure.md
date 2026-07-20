@@ -9,8 +9,8 @@
 ```
 .
 ├─ apps/
-│  ├─ web/                      # Cloudflare Pages: React + Vite 前端（管理后台 + 公共状态页）
-│  └─ worker/                   # Cloudflare Workers: Hono API + scheduled 监控引擎
+│  ├─ web/                      # React + Vite 前端（管理后台 + 公共状态页）；构建产物由 Worker 作为静态资源提供
+│  └─ worker/                   # Cloudflare Workers: Hono API + scheduled 监控引擎 + 前端静态资源
 ├─ packages/
 │  ├─ shared/                   # 共享类型/常量/Zod schema（前后端共用）
 │  └─ db/                       # Drizzle schema 与 DB 访问封装（供 worker 使用）
@@ -32,7 +32,7 @@
 
 ```
 apps/worker/
-├─ wrangler.toml                # Worker 配置（D1 binding、cron triggers、Free Plan CPU profile）
+├─ wrangler.toml                # Worker 配置（D1 binding、cron triggers、Free Plan CPU profile、[assets] 静态资源）
 ├─ migrations/                  # D1 SQL migrations（wrangler d1 migrations apply）
 └─ src/
    ├─ index.ts                  # Worker entry：fetch/scheduled/export default
@@ -106,6 +106,7 @@ apps/web/
 
 - 与后端共享的类型与 schema 优先从 `packages/shared` 导入，避免前后端“各写一套”。
 - API 请求统一走 `api/client.ts`；不要在组件内散落裸 `fetch`。
+- 前端构建产物（`apps/web/dist`）由 Worker 通过 `[assets]` 绑定提供（见 `apps/worker/wrangler.toml`）；`/api/*` 由 Worker 处理，其余路径走静态资源 + SPA fallback。前端与 API 同源，`VITE_API_BASE` 默认 `/api/v1` 即可。
 
 ---
 

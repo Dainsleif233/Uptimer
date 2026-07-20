@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "pnpm dev:init && pnpm dev:start",
-    "dev:init": "pnpm --filter @uptimer/worker init:local",
+    "dev:init": "pnpm --filter @uptimer/worker init:local && pnpm --filter @uptimer/web ensure:dist",
     "dev:start": "pnpm -r --parallel --filter @uptimer/worker --filter @uptimer/web dev",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck",

@@ -5,10 +5,7 @@ import { getDb, monitors } from '@uptimer/db';
 
 import type { Env } from '../env';
 import { hasValidAdminTokenRequest } from '../middleware/auth';
-import {
-  homepageFromStatusPayload,
-  readHomepageHistoryPreviews,
-} from '../public/homepage';
+import { homepageFromStatusPayload, readHomepageHistoryPreviews } from '../public/homepage';
 import { computePublicStatusPayload } from '../public/status';
 import {
   buildNumberedPlaceholders,
@@ -131,9 +128,9 @@ publicRoutes.use(
     cacheName: 'uptimer-public',
     maxAgeSeconds: 30,
     // Cache API lookups can be CPU-expensive on Cloudflare. The homepage
-    // endpoints already have their own caching layers (Pages HTML cache +
-    // public snapshot freshness), so skipping the shared edge cache reduces
-    // median CPU without changing the user-visible payload.
+    // endpoints already have their own caching layers (public snapshot
+    // freshness + the hot-path Cache API layer), so skipping the shared edge
+    // cache reduces median CPU without changing the user-visible payload.
     skipPathnames: [
       '/homepage',
       '/homepage-artifact',
@@ -866,9 +863,7 @@ async function listPublicMaintenanceWindowsPage(opts: {
     .slice(0, opts.limit)
     .map(({ row, monitorIds }) => maintenanceWindowRowToApi(row, monitorIds));
   const next_cursor =
-    collected.length > opts.limit
-      ? (collected[opts.limit - 1]?.row.id ?? null)
-      : null;
+    collected.length > opts.limit ? (collected[opts.limit - 1]?.row.id ?? null) : null;
 
   return {
     maintenance_windows: maintenanceWindows,
@@ -891,7 +886,7 @@ publicRoutes.get('/status', async (c) => {
   if (includeHiddenMonitors) {
     const payload = await trace.timeAsync('status_compute', () =>
       computePublicStatusPayload(c.env.DB, now, {
-      includeHiddenMonitors: true,
+        includeHiddenMonitors: true,
       }),
     );
     const res = applyPrivateNoStore(c.json(payload));
@@ -1182,9 +1177,8 @@ publicRoutes.get('/incidents', async (c) => {
     const initialCursor =
       cursor === undefined
         ? null
-        : await c.env.DB
-            .prepare(
-              `
+        : await c.env.DB.prepare(
+            `
                 SELECT id, resolved_at
                 FROM incidents
                 WHERE id = ?1
@@ -1192,7 +1186,7 @@ publicRoutes.get('/incidents', async (c) => {
                   AND resolved_at IS NOT NULL
                   AND ${incidentVisibilitySql}
               `,
-            )
+          )
             .bind(cursor)
             .first<ResolvedIncidentCursorRow>();
 
@@ -1399,7 +1393,10 @@ publicRoutes.get('/monitors/:id/day-context', async (c) => {
   const visibleMonitorIds = includeHiddenMonitors
     ? new Set<number>()
     : await (async () => {
-        const scopedMonitorIds = [...monitorIdsByWindowId.values(), ...monitorIdsByIncidentId.values()].flat();
+        const scopedMonitorIds = [
+          ...monitorIdsByWindowId.values(),
+          ...monitorIdsByIncidentId.values(),
+        ].flat();
         return scopedMonitorIds.length === 0
           ? new Set<number>()
           : listStatusPageVisibleMonitorIds(c.env.DB, scopedMonitorIds);

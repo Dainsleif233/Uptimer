@@ -17,7 +17,9 @@ function normalizeApiPathname(pathname: string): string {
 
 function isGetOnlyPublicApiPath(pathname: string): boolean {
   const normalizedPathname = normalizeApiPathname(pathname);
-  return normalizedPathname === '/api/v1/public' || normalizedPathname.startsWith('/api/v1/public/');
+  return (
+    normalizedPathname === '/api/v1/public' || normalizedPathname.startsWith('/api/v1/public/')
+  );
 }
 
 function allowedMethodsForApiPath(pathname: string): string {
@@ -59,8 +61,9 @@ function rewriteAdminRequest(req: Request): Request {
   return new Request(url.toString(), req);
 }
 
-// Minimal CORS support so Pages (or any web UI) can call the API when hosted on a different origin
-// (e.g. Pages on *.pages.dev and API on *.workers.dev). We reflect the Origin to keep it simple and
+// Minimal CORS support so any cross-origin web UI or API consumer can call this Worker.
+// The frontend is now served from the same Worker (same origin), so same-origin requests need
+// no CORS — this remains for external callers. We reflect the Origin to keep it simple and
 // avoid hardcoding a single hostname in the Worker config.
 app.use('/api/*', async (c, next) => {
   const origin = c.req.header('Origin');
@@ -81,7 +84,7 @@ app.use('/api/*', async (c, next) => {
 });
 
 // Redirect legacy `/api/*` paths to the versioned API.
-// This is useful when Pages (dev/prod) proxies `/api` to this Worker but the
+// This is useful when a reverse proxy forwards `/api` to this Worker but the
 // frontend calls `/api/v1/...`.
 app.use('/api/*', async (c, next) => {
   const path = new URL(c.req.url).pathname;

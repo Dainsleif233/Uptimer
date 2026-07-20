@@ -8,7 +8,7 @@
 [![Deploy](https://github.com/VrianCao/Uptimer/actions/workflows/deploy.yml/badge.svg)](https://github.com/VrianCao/Uptimer/actions/workflows/deploy.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Monitor your services, display real-time status to visitors, and get notified when things go down — all running on Cloudflare Workers + Pages + D1 with zero ops.
+Monitor your services, display real-time status to visitors, and get notified when things go down — all running on Cloudflare Workers + D1 with zero ops.
 
 [Quick Deploy](#quick-deploy-5-steps) · [Local Dev](#local-development) · [Documentation](#documentation) · [Contributing](CONTRIBUTING.md)
 
@@ -22,7 +22,7 @@ English | **[中文](README.zh-CN.md)**
 
 - **Zero ops** — No servers, containers, or databases to manage. Runs entirely on Cloudflare's free/paid tiers.
 - **Edge-native** — Monitoring probes run from Cloudflare Workers; your status page is served from the CDN edge.
-- **One-click deploy** — Push to `main` and GitHub Actions handles everything: D1 migrations, Worker deployment, Pages build.
+- **One-click deploy** — Push to `main` and GitHub Actions handles everything: D1 migrations and a single Worker deploy (frontend + API together).
 - **Full-featured** — HTTP/TCP checks, incident management, maintenance windows, webhook notifications, admin dashboard.
 
 ## Features
@@ -67,16 +67,18 @@ English | **[中文](README.zh-CN.md)**
                 ┌──────────────────────────────────────────┐
                 │            Cloudflare Network            │
                 │                                          │
-Visitors ──────►│  Pages (React SPA)                       │
+Visitors ──────►│  Worker (React SPA static assets)        │
                 │      │                                   │
-                │      ▼                                   │
-Admin ─────────►│  Workers (Hono API)                      │
+Admin ─────────►│      │  /api/v1/*  →  Hono API           │
                 │      │              │                    │
                 │      ▼              ▼                    │
-                │    D1 DB      Cron Triggers              │
-                │              (scheduled probes)          │
-                │                     │                    │
-                └─────────────────────┼────────────────────┘
+                │    static        Cron Triggers          │
+                │    assets       (scheduled probes)      │
+                │      │              │                    │
+                │      ▼              ▼                    │
+                │    D1 DB ◄─────────┘                    │
+                │                                          │
+                └─────────────────────┬────────────────────┘
                                       │
                                       ▼
                            Target Services (HTTP/TCP)
@@ -85,6 +87,8 @@ Admin ─────────►│  Workers (Hono API)                     
                               Webhooks ──► Discord / Slack / ntfy
 ```
 
+The frontend (status page + admin dashboard) and the API are deployed together as a **single Cloudflare Worker**. The built SPA is uploaded as the Worker's static assets, so the status page, admin dashboard, and API all share one origin.
+
 ## Tech Stack
 
 | Layer           | Technology                                                         |
@@ -92,7 +96,7 @@ Admin ─────────►│  Workers (Hono API)                     
 | Frontend        | React 18, Vite, TypeScript, Tailwind CSS, TanStack Query, Recharts |
 | Backend         | Cloudflare Workers, Hono, Zod                                      |
 | Database        | Cloudflare D1 (SQLite), Drizzle ORM                                |
-| Hosting         | Cloudflare Pages (frontend), Workers (API)                         |
+| Hosting         | Cloudflare Workers (frontend static assets + API, one origin)     |
 | CI/CD           | GitHub Actions                                                     |
 | Package Manager | pnpm (monorepo)                                                    |
 
@@ -109,7 +113,6 @@ Click the **Fork** button at the top-right of this repository to create your own
 1. Go to [Cloudflare Dashboard → API Tokens](https://dash.cloudflare.com/profile/api-tokens)
 2. Click **Create Token** → use the **Edit Cloudflare Workers** template
 3. Add the following permissions:
-   - `Account / Cloudflare Pages / Edit`
    - `Account / D1 / Edit`
    - `Account / Account Settings / Read`
 4. Copy the generated token
@@ -131,17 +134,16 @@ Go to **Actions** → **Deploy to Cloudflare** → **Run workflow** (or simply p
 The workflow automatically:
 
 - Creates the D1 database and runs migrations
-- Deploys the Worker (API + cron-based monitoring)
-- Builds and deploys the Pages frontend (status page)
+- Builds the frontend (Vite) and deploys it together with the API as a single Worker (the SPA is uploaded as the Worker's static assets)
 - Injects the admin token as a Worker secret
 
 ### Step 5 — Visit Your Status Page
 
 Once the workflow succeeds (usually ~2 min for first deploy):
 
-- **Status page** → `https://<your-repo-name>.pages.dev`
-- **Admin dashboard** → `https://<your-repo-name>.pages.dev/admin`
-- **API** → `https://<your-repo-name>.workers.dev/api/v1/public/status`
+- **Status page** → `https://<your-worker-name>.workers.dev`
+- **Admin dashboard** → `https://<your-worker-name>.workers.dev/admin`
+- **API** → `https://<your-worker-name>.workers.dev/api/v1/public/status`
 
 Log in to the admin dashboard with the `UPTIMER_ADMIN_TOKEN` you set, and start adding monitors.
 
