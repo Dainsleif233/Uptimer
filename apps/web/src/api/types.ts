@@ -4,6 +4,8 @@ export type MonitorStatus = 'up' | 'down' | 'maintenance' | 'paused' | 'unknown'
 export type CheckStatus = 'up' | 'down' | 'maintenance' | 'unknown';
 export type MonitorType = 'http' | 'tcp';
 export type HttpResponseMatchMode = 'contains' | 'regex';
+/** Exact code or inclusive range (100-599). Matches worker/DB status rule JSON. */
+export type StatusCodeRule = number | { from: number; to: number };
 export type SupportedLocale = 'en' | 'zh-CN' | 'zh-TW' | 'ja' | 'es';
 export type LocaleSetting = 'auto' | SupportedLocale;
 export type HomepageBootstrapMode = 'full' | 'partial';
@@ -356,7 +358,8 @@ export interface AdminMonitor {
   http_headers_json: Record<string, string> | null;
   http_body: string | null;
   follow_redirects: boolean;
-  expected_status_json: number[] | null;
+  expected_status_json: StatusCodeRule[] | null;
+  forbidden_status_json: StatusCodeRule[] | null;
   response_keyword: string | null;
   response_keyword_mode: HttpResponseMatchMode | null;
   response_forbidden_keyword: string | null;
@@ -387,7 +390,8 @@ export interface CreateMonitorInput {
   http_headers_json?: Record<string, string>;
   http_body?: string;
   follow_redirects?: boolean;
-  expected_status_json?: number[];
+  expected_status_json?: StatusCodeRule[];
+  forbidden_status_json?: StatusCodeRule[];
   response_keyword?: string;
   response_keyword_mode?: HttpResponseMatchMode;
   response_forbidden_keyword?: string;
@@ -409,7 +413,8 @@ export interface PatchMonitorInput {
   http_headers_json?: Record<string, string> | null;
   http_body?: string | null;
   follow_redirects?: boolean;
-  expected_status_json?: number[] | null;
+  expected_status_json?: StatusCodeRule[] | null;
+  forbidden_status_json?: StatusCodeRule[] | null;
   response_keyword?: string | null;
   response_keyword_mode?: HttpResponseMatchMode | null;
   response_forbidden_keyword?: string | null;

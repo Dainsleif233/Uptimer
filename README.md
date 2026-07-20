@@ -29,7 +29,7 @@ English | **[中文](README.zh-CN.md)**
 
 **Monitoring**
 
-- HTTP(S) probes with custom headers, body, status code & keyword assertions
+- HTTP(S) probes with custom headers, body, status code allow/deny lists (exact codes & ranges) & keyword assertions
 - TCP port connectivity checks
 - Configurable timeouts, retry thresholds, and flapping control
 - Automatic state machine: UP / DOWN / MAINTENANCE / PAUSED / UNKNOWN
