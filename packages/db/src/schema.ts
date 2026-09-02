@@ -108,17 +108,24 @@ export const outages = sqliteTable(
   }),
 );
 
-export const incidents = sqliteTable('incidents', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  title: text('title').notNull(),
-  status: text('status').$type<IncidentStatus>().notNull(),
-  impact: text('impact').$type<IncidentImpact>().notNull().default('minor'),
-  message: text('message'),
-  startedAt: integer('started_at')
-    .notNull()
-    .default(sql`(CAST(strftime('%s','now') AS INTEGER))`),
-  resolvedAt: integer('resolved_at'),
-});
+export const incidents = sqliteTable(
+  'incidents',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    title: text('title').notNull(),
+    status: text('status').$type<IncidentStatus>().notNull(),
+    impact: text('impact').$type<IncidentImpact>().notNull().default('minor'),
+    message: text('message'),
+    startedAt: integer('started_at')
+      .notNull()
+      .default(sql`(CAST(strftime('%s','now') AS INTEGER))`),
+    resolvedAt: integer('resolved_at'),
+  },
+  (t) => ({
+    statusStartedIdx: index('idx_incidents_status_started').on(t.status, t.startedAt),
+    statusResolvedIdx: index('idx_incidents_status_resolved').on(t.status, t.resolvedAt),
+  }),
+);
 
 export const incidentUpdates = sqliteTable(
   'incident_updates',
@@ -152,16 +159,23 @@ export const incidentMonitors = sqliteTable(
   }),
 );
 
-export const maintenanceWindows = sqliteTable('maintenance_windows', {
-  id: integer('id').primaryKey({ autoIncrement: true }),
-  title: text('title').notNull(),
-  message: text('message'),
-  startsAt: integer('starts_at').notNull(),
-  endsAt: integer('ends_at').notNull(),
-  createdAt: integer('created_at')
-    .notNull()
-    .default(sql`(CAST(strftime('%s','now') AS INTEGER))`),
-});
+export const maintenanceWindows = sqliteTable(
+  'maintenance_windows',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    title: text('title').notNull(),
+    message: text('message'),
+    startsAt: integer('starts_at').notNull(),
+    endsAt: integer('ends_at').notNull(),
+    createdAt: integer('created_at')
+      .notNull()
+      .default(sql`(CAST(strftime('%s','now') AS INTEGER))`),
+  },
+  (t) => ({
+    startsAtIdx: index('idx_maintenance_windows_starts_at').on(t.startsAt),
+    endsAtIdx: index('idx_maintenance_windows_ends_at').on(t.endsAt),
+  }),
+);
 
 export const maintenanceWindowMonitors = sqliteTable(
   'maintenance_window_monitors',
