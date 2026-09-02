@@ -711,6 +711,12 @@ describe('scheduler/scheduled regression', () => {
         (request) => request.headers.get('X-Uptimer-Runtime-Fragments-Only') === '1',
       ),
     ).toBe(true);
+    // Non-split fragment pipeline: the batch owns the write, so no defer header.
+    expect(
+      checkBatchRequests.every(
+        (request) => request.headers.get('X-Uptimer-Runtime-Fragments-Defer') === null,
+      ),
+    ).toBe(true);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
       '/api/v1/internal/scheduled/check-batch',
       '/api/v1/internal/scheduled/check-batch',
@@ -760,6 +766,9 @@ describe('scheduler/scheduled regression', () => {
       const path = new URL(request.url).pathname;
       if (path === '/api/v1/internal/scheduled/check-batch') {
         expect(request.headers.get('X-Uptimer-Runtime-Fragments-Only')).toBeNull();
+        // Split mode must tell the batch to skip its own fragment write; the
+        // scheduler performs a single consolidated write instead.
+        expect(request.headers.get('X-Uptimer-Runtime-Fragments-Defer')).toBe('1');
         const body = (await request.json()) as { ids: number[]; checked_at: number };
         return new Response(
           JSON.stringify({

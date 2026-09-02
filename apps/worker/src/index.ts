@@ -63,6 +63,13 @@ function wantsRuntimeUpdateFragmentsOnly(request: Request): boolean {
   return normalizeTruthyHeader(request.headers.get('X-Uptimer-Runtime-Fragments-Only'));
 }
 
+// Split pipeline: the scheduler collects `runtime_updates` from every batch response
+// and issues one consolidated fragment write. Writing here as well would upsert the
+// exact same `monitor:<id>` rows with the same `generated_at`, doubling rows_written.
+function wantsRuntimeUpdateFragmentWritesDeferred(request: Request): boolean {
+  return normalizeTruthyHeader(request.headers.get('X-Uptimer-Runtime-Fragments-Defer'));
+}
+
 function shouldLogInternalCheckBatchDiagnostics(env: Env): boolean {
   return normalizeTruthyHeader(env.UPTIMER_INTERNAL_CHECK_BATCH_DIAGNOSTICS ?? null);
 }
@@ -221,7 +228,7 @@ const internalShardedPublicSnapshotSeedBodySchema = z.object({
 const internalShardedPublicSnapshotContinuationBodySchema = z.discriminatedUnion('step', [
   z.object({
     step: z.literal('runtime'),
-    update_offset: z.number().int().min(0).optional(),
+    update_cursor: z.string().max(256).optional(),
     update_limit: z.number().int().min(1).max(10).optional(),
   }),
   z.object({
@@ -637,8 +644,8 @@ async function handleInternalShardedPublicSnapshotContinuation(
       parsed.data.step === 'runtime'
         ? {
             step: 'runtime',
-            ...(parsed.data.update_offset !== undefined
-              ? { updateOffset: parsed.data.update_offset }
+            ...(parsed.data.update_cursor !== undefined
+              ? { updateCursor: parsed.data.update_cursor }
               : {}),
             ...(parsed.data.update_limit !== undefined
               ? { updateLimit: parsed.data.update_limit }
@@ -666,7 +673,7 @@ async function handleInternalShardedPublicSnapshotContinuation(
     step.step === 'runtime'
       ? {
           step: 'runtime',
-          ...(step.updateOffset !== undefined ? { update_offset: step.updateOffset } : {}),
+          ...(step.updateCursor !== undefined ? { update_cursor: step.updateCursor } : {}),
           ...(step.updateLimit !== undefined ? { update_limit: step.updateLimit } : {}),
         }
       : step.step === 'assemble'
@@ -707,7 +714,10 @@ async function handleInternalShardedPublicSnapshotContinuation(
       ...(result.writeCount !== undefined ? { write_count: result.writeCount } : {}),
       ...(result.invalidCount !== undefined ? { invalid_count: result.invalidCount } : {}),
       ...(result.staleCount !== undefined ? { stale_count: result.staleCount } : {}),
-      ...(result.updateOffset !== undefined ? { update_offset: result.updateOffset } : {}),
+      ...(result.updateCursor !== undefined ? { update_cursor: result.updateCursor } : {}),
+      ...(result.nextUpdateCursor !== undefined
+        ? { next_update_cursor: result.nextUpdateCursor }
+        : {}),
       ...(result.updateLimit !== undefined ? { update_limit: result.updateLimit } : {}),
       ...(result.rowCount !== undefined ? { row_count: result.rowCount } : {}),
       ...(result.hasMore !== undefined ? { has_more: result.hasMore } : {}),
@@ -986,8 +996,14 @@ async function handleInternalScheduledCheckBatch(
   );
   const runtimeFragmentsOnly =
     monitorUpdateFragmentWritesEnabled && wantsRuntimeUpdateFragmentsOnly(request);
+  // When the scheduler will write the consolidated fragment set itself, skip the
+  // per-batch write entirely instead of upserting the same rows twice.
+  const runtimeFragmentWritesDeferred =
+    monitorUpdateFragmentWritesEnabled &&
+    !runtimeFragmentsOnly &&
+    wantsRuntimeUpdateFragmentWritesDeferred(request);
   let fragmentWriteCount = 0;
-  if (monitorUpdateFragmentWritesEnabled) {
+  if (monitorUpdateFragmentWritesEnabled && !runtimeFragmentWritesDeferred) {
     const [{ buildMonitorRuntimeUpdateFragmentWrites }, { writePublicSnapshotFragments }] =
       await timeInternalCheckBatchDiagnostic(
         diagnosticsEnabled,
@@ -1026,6 +1042,10 @@ async function handleInternalScheduledCheckBatch(
         ctx.waitUntil(writeFragments());
       }
     }
+  } else if (runtimeFragmentWritesDeferred && trace?.enabled) {
+    trace.setLabel('monitor_update_fragment_write_count', 0);
+    trace.setLabel('runtime_updates_fragmented', 0);
+    trace.setLabel('runtime_update_fragment_writes_deferred', 1);
   }
 
   const responseRuntimeUpdates = runtimeFragmentsOnly ? [] : result.runtimeUpdates;

@@ -734,6 +734,9 @@ async function runScheduledCheckBatchViaService(
     ...(context.runtimeFragmentsOnly && !returnRuntimeUpdatesForSplit
       ? { 'X-Uptimer-Runtime-Fragments-Only': '1' }
       : {}),
+    // In split mode the scheduler writes the consolidated fragment set after all
+    // batches return, so the batch must not write the same rows itself.
+    ...(returnRuntimeUpdatesForSplit ? { 'X-Uptimer-Runtime-Fragments-Defer': '1' } : {}),
   };
   if (traceScheduledRefresh) {
     headers['X-Uptimer-Trace'] = '1';
