@@ -470,13 +470,48 @@ Key conventions:
 - `public_snapshots.key`: `homepage` / `status` / `homepage:artifact`。
 - `public_snapshot_fragments.snapshot_key`: `homepage:envelope`、`homepage:monitors`、`status:envelope`、`status:monitors`、`homepage:artifact:monitors`、`monitor-runtime:updates`。
 - artifact rows use `updated_at` for public freshness, while the body/snapshot still validates against stored `generated_at`。
+- fragment UPSERT 带脏检查：只有 `generated_at` 变新，或 `generated_at` 相同但 `body_json`
+  不同时才落库。空闲 tick 会用未变化的快照重新 seed 全部 fragment，这个守卫让写入为 0 行。
+- 分页 fragment 用 keyset seek（`fragment_key > ?`），不要用 `LIMIT ... OFFSET ...`：
+  SQLite 的 OFFSET 会逐行扫过并丢弃被跳过的行。
 
 ### 4.8 Retention 清理（删除过期 check_results）
 
+不要按 `checked_at` 单独过滤。`check_results` 唯一的索引是 `(monitor_id, checked_at)`，
+少了前导列就退化成全表扫描，而 D1 的 rows_read 计的是扫描行数：
+
 ```ts
-const cutoff = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
+// ❌ 全表扫描，每一批都扫一遍整表
 await env.DB.prepare('DELETE FROM check_results WHERE checked_at < ?').bind(cutoff).run();
 ```
+
+正确做法是先走出出现过的 `monitor_id`，再逐个 monitor 分批删除（实现见
+`apps/worker/src/scheduler/retention.ts`）：
+
+```ts
+// keyset seek，命中 (monitor_id, checked_at) 的前导列
+const next = await env.DB
+  .prepare('SELECT monitor_id FROM check_results WHERE monitor_id > ?1 ORDER BY monitor_id LIMIT 1')
+  .bind(lastMonitorId)
+  .first<{ monitor_id: number }>();
+
+// 每批只读实际删除的行
+await env.DB
+  .prepare(
+    `DELETE FROM check_results
+     WHERE id IN (
+       SELECT id FROM check_results
+       WHERE monitor_id = ?1 AND checked_at < ?2
+       LIMIT ?3
+     )`,
+  )
+  .bind(monitorId, cutoff, batchSize)
+  .run();
+```
+
+`EXPLAIN QUERY PLAN` 可以确认：前者是
+`SCAN check_results USING COVERING INDEX ... + USE TEMP B-TREE FOR ORDER BY`，
+后者是 `SEARCH check_results USING COVERING INDEX idx_check_results_monitor_time (monitor_id=? AND checked_at<?)`。
 
 ---
 
@@ -617,6 +652,19 @@ Internal（Bearer Token；scheduled/service-binding only）：
 - `POST /api/v1/internal/continue/sharded-public-snapshot`
 
 Free Plan CPU profile vars are documented in `Develop/Worker-CPU-10ms-Release-Readiness.md` and enabled in `apps/worker/wrangler.toml`. Do **not** enable `UPTIMER_PUBLIC_SHARDED_HOMEPAGE_RUNTIME_SEED` for the release profile.
+
+### D1 free-plan accounting (read this before adding an index or a per-tick write)
+
+- Limits: 5,000,000 rows read/day, 100,000 rows **written**/day.
+- `rows_read` counts rows **scanned**, not returned. A predicate that cannot use the
+  leading column of an index scans the table, even with a `LIMIT`.
+- `rows_written` counts index maintenance. One row inserted into a table with one
+  secondary index costs 2 rows written; the matching delete costs another 2.
+- Practical consequence for this project: every per-monitor, per-tick write multiplies by
+  `N × 1440`/day. Budget it before adding one. See `Develop/Application.md` §7.3 for the
+  current per-check ledger.
+- `check_results` deletes must bind `monitor_id`; a `checked_at`-only predicate has no
+  usable index. See `Develop/Application.md` §7.2.
 
 ---
 

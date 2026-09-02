@@ -316,6 +316,9 @@ CREATE TABLE IF NOT EXISTS check_results (
 );
 CREATE INDEX IF NOT EXISTS idx_check_results_monitor_time
   ON check_results(monitor_id, checked_at);
+-- 刻意不为 check_results 增加更多索引：这是写入量最大的表，每个额外索引都会让
+-- 每次 INSERT 与 retention DELETE 各多计 1 行 rows_written。所有 checked_at 过滤都必须
+-- 同时绑定 monitor_id，才能命中上面这个复合索引（retention 因此按 monitor 逐个删除）。
 
 -- 故障区间（长期保留，用于 SLA 与历史事件）
 CREATE TABLE IF NOT EXISTS outages (
@@ -339,6 +342,12 @@ CREATE TABLE IF NOT EXISTS incidents (
   started_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
   resolved_at INTEGER
 );
+-- D1 按“扫描行数”计费 rows_read；公共事件列表/历史预览/快照守卫都按 status 过滤并按
+-- started_at / resolved_at 排序，缺索引时每次请求都会全表扫描（迁移 0015）。
+CREATE INDEX IF NOT EXISTS idx_incidents_status_started
+  ON incidents(status, started_at);
+CREATE INDEX IF NOT EXISTS idx_incidents_status_resolved
+  ON incidents(status, resolved_at);
 
 CREATE TABLE IF NOT EXISTS incident_updates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -349,7 +358,6 @@ CREATE TABLE IF NOT EXISTS incident_updates (
 );
 CREATE INDEX IF NOT EXISTS idx_incident_updates_incident_time
   ON incident_updates(incident_id, created_at);
-
 -- Incident 与 monitors 关联（多对多；用于状态页展示影响范围）
 CREATE TABLE IF NOT EXISTS incident_monitors (
   incident_id INTEGER NOT NULL,
@@ -369,6 +377,12 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
   ends_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
 );
+-- 每分钟 cron 会跑两次时间区间查询（starts_at / ends_at BETWEEN），公共路由也按区间过滤；
+-- 缺索引时是每分钟 2 次以上全表扫描（迁移 0015）。
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_starts_at
+  ON maintenance_windows(starts_at);
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_ends_at
+  ON maintenance_windows(ends_at);
 
 -- 维护窗口与 monitors 关联（多对多；用于“告警抑制”与状态页展示）
 CREATE TABLE IF NOT EXISTS maintenance_window_monitors (
@@ -451,6 +465,36 @@ CREATE INDEX IF NOT EXISTS idx_public_snapshot_fragments_snapshot_generated
 - `check_results`：保留最近 7 天（或更短，如 24h），用于图表与心跳条。
 - `outages` / `incidents`：保留 90 天或更久（体积小）。
 - 每日 Cron 执行清理任务：删除过期 `check_results`；可选对 `outages` 做归档。
+
+Retention 删除必须按 `monitor_id` 逐个执行（`WHERE monitor_id = ?1 AND checked_at < ?2`），
+不能写成只按 `checked_at` 过滤。D1 的 rows_read 计的是扫描行数：只按 `checked_at` 过滤
+用不上 `idx_check_results_monitor_time` 的前导列，每一批删除都要全表扫描一次，几万行的
+删除可能产生千万级 rows_read。实现见 `apps/worker/src/scheduler/retention.ts`：先用 keyset
+seek 走出 `check_results` 里出现过的 `monitor_id`，再对每个 monitor 分批删除。
+
+### 7.3 D1 免费额度与写放大（重要约束）
+
+免费额度：每天 500 万 rows_read、10 万 rows_written。**索引写入也计入 rows_written**，
+即一张有 1 个二级索引的表，每插入 1 行计 2 行写入，删除同理。
+
+因此每次探测的完整写入成本必须被当作容量预算来管理。当前基线（每 monitor 每次探测）：
+
+| 写入来源 | 行数 | 说明 |
+| --- | --- | --- |
+| `check_results` INSERT | 2 | 数据行 + `idx_check_results_monitor_time` |
+| `monitor_state` UPSERT | 1 | PK 为 rowid 别名，无二级索引 |
+| retention DELETE（摊销） | 2 | 数据行 + 索引行 |
+| `monitor-runtime:updates` fragment | 2 | 数据行 + `idx_public_snapshot_fragments_snapshot_generated` |
+| `homepage:monitors` / `status:monitors` fragment | 4 | 各 2；内容变化时才写（见下） |
+
+结论：60s 间隔下 `N × 1440 × (每次探测行数)` 必须 ≤ 100k。新增任何“每 monitor 每 tick 写一行”
+的物化层之前，先按这个公式算容量；新增 `check_results` 索引之前，先算清它会带来的
+`2 × N × 1440` 额外写入。
+
+Fragment 写入带脏检查：`public_snapshot_fragments` 的 UPSERT 只在
+`generated_at` 变新、或 `generated_at` 相同但 `body_json` 不同时才落库。空闲 tick 里
+pipeline 会用未变化的快照重新 seed 一遍全部 fragment，这个守卫让那些写入变成 0 行。
+所有读取路径都以 `generated_at` 判定新鲜度，因此跳过纯 `updated_at` 变化是安全的。
 
 ### 7.3 查询模式与 SLA/图表计算
 
@@ -537,6 +581,22 @@ Internal（Bearer Token + feature flags；scheduled/service-binding 使用，不
 - `POST /api/v1/internal/seed/sharded-public-snapshot`
 - `POST /api/v1/internal/assemble/sharded-public-snapshot`
 - `POST /api/v1/internal/continue/sharded-public-snapshot`
+
+Internal 协议补充：
+
+- `POST /api/v1/internal/scheduled/check-batch` 支持两个互斥的 fragment 写入头：
+  - `X-Uptimer-Runtime-Fragments-Only: 1` —— 由子请求同步写 runtime fragment，响应不再回传
+    `runtime_updates`。
+  - `X-Uptimer-Runtime-Fragments-Defer: 1` —— 子请求**不写** fragment，只回传
+    `runtime_updates`，由 scheduler 统一调用 `/internal/write/runtime-update-fragments`
+    写一次。split 模式（`UPTIMER_INTERNAL_CHECK_BATCH_FRAGMENT_WRITE_SPLIT=1`）必须带这个头，
+    否则同一批 fragment 会被写两遍（每 monitor 每 tick 多 2 行 rows_written）。
+    `Only` 优先于 `Defer`。
+- `POST /api/v1/internal/continue/sharded-public-snapshot` 的 `runtime` 步骤使用 keyset 游标
+  `update_cursor`（fragment_key，`ORDER BY fragment_key` 上界）而不是数值 offset。
+  `OFFSET` 会让 SQLite 逐行扫过并丢弃跳过的行，分页 N 个 fragment 的总扫描量是
+  O(N²/R)；keyset seek 只读实际返回的行。响应回传 `update_cursor` 与
+  `next_update_cursor`，下一步用 `next_update_cursor` 继续。
 
 ### 8.4 分页与过滤
 

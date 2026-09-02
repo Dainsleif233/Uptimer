@@ -159,6 +159,13 @@ UPTIMER_INTERNAL_CHECK_BATCH_TRUST_SCHEDULER_LEASE = "1"
 UPTIMER_SCHEDULED_REFRESH_LOGS = "0"
 ```
 
+> ⚠️ D1 额度提醒：这份 profile 是按 **CPU 10ms** 调优的，不是按 D1 写入额度调优的。
+> `UPTIMER_PUBLIC_HOMEPAGE_ARTIFACT_FRAGMENT_WRITES = "1"` 会为每个 monitor 每 tick 多写
+> 一份 `homepage:artifact:monitors` fragment（含索引写共 2 行 rows_written）。若逼近免费额度
+> 的 100k rows_written/day，可以关掉它把 artifact HTML 改为 assemble 时现渲染 —— 这是
+> **D1 写入额度 ↔ CPU 预算** 的直接权衡，改动后必须按本文档基线重测 CPU。
+> D1 侧的计费模型与每次探测的写入账本见 `Develop/Application.md` §7.3。
+
 ### 3.3 Explicitly disabled / not part of release profile
 
 ```toml
