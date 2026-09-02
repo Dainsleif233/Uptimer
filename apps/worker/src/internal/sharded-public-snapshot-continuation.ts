@@ -13,7 +13,7 @@ import {
 } from './sharded-public-snapshot-core';
 
 export type ShardedPublicSnapshotContinuationStep =
-  | { step: 'runtime'; updateOffset?: number; updateLimit?: number }
+  | { step: 'runtime'; updateCursor?: string; updateLimit?: number }
   | {
       step: 'seed';
       kind: ShardedPublicSnapshotKind;
@@ -44,7 +44,8 @@ export type ShardedPublicSnapshotContinuationResult = {
   writeCount?: number;
   invalidCount?: number;
   staleCount?: number;
-  updateOffset?: number;
+  updateCursor?: string | null;
+  nextUpdateCursor?: string | null;
   updateLimit?: number;
   rowCount?: number;
   hasMore?: boolean;
@@ -120,7 +121,7 @@ function shouldLogDiagnostics(env: Env): boolean {
 
 function diagnosticStepName(step: ShardedPublicSnapshotContinuationStep): string {
   if (step.step === 'runtime') {
-    return step.updateLimit !== undefined ? `runtime:${step.updateOffset ?? 0}` : 'runtime';
+    return step.updateLimit !== undefined ? `runtime:${step.updateCursor ?? '-'}` : 'runtime';
   }
   if (step.step === 'assemble') return `assemble:${step.kind}`;
   if (step.step === 'artifact') return 'artifact:homepage';
@@ -151,7 +152,7 @@ function logContinuationDiagnostics(
       : null,
     result.monitorCount !== undefined ? `monitors=${result.monitorCount}` : null,
     result.writeCount !== undefined ? `writes=${result.writeCount}` : null,
-    result.updateOffset !== undefined ? `update_offset=${result.updateOffset}` : null,
+    result.updateCursor !== undefined ? `update_cursor=${result.updateCursor ?? '-'}` : null,
     result.updateLimit !== undefined ? `update_limit=${result.updateLimit}` : null,
     result.rowCount !== undefined ? `rows=${result.rowCount}` : null,
     result.hasMore !== undefined ? `has_more=${result.hasMore ? 1 : 0}` : null,
@@ -240,7 +241,7 @@ function toWireStep(step: ShardedPublicSnapshotContinuationStep): Record<string,
   }
   return {
     step: step.step,
-    ...(step.updateOffset !== undefined ? { update_offset: step.updateOffset } : {}),
+    ...(step.updateCursor !== undefined ? { update_cursor: step.updateCursor } : {}),
     ...(step.updateLimit !== undefined ? { update_limit: step.updateLimit } : {}),
   };
 }
@@ -315,13 +316,13 @@ export async function runShardedPublicSnapshotContinuation(opts: {
       return skippedResult;
     }
     const runtimeLimit = readOptionalBoundedRuntimeUpdateLimit(opts.env, opts.step.updateLimit);
-    const updateOffset = Math.max(0, Math.floor(opts.step.updateOffset ?? 0));
+    const updateCursor = typeof opts.step.updateCursor === 'string' ? opts.step.updateCursor : null;
     const operationStartedAt = diagnostics ? Date.now() : 0;
     const result = runtimeLimit
       ? await refreshMonitorRuntimeSnapshotFromUpdateFragmentsPage({
           env: opts.env,
           now: opts.now,
-          offset: updateOffset,
+          cursor: updateCursor,
           limit: runtimeLimit,
         })
       : await refreshMonitorRuntimeSnapshotFromUpdateFragments({
@@ -329,10 +330,11 @@ export async function runShardedPublicSnapshotContinuation(opts: {
           now: opts.now,
         });
     const operationMs = diagnostics ? Date.now() - operationStartedAt : undefined;
+    const nextUpdateCursor = result.nextUpdateCursor ?? null;
     const nextSteps: ShardedPublicSnapshotContinuationStep[] = !result.ok
       ? []
-      : runtimeLimit && result.hasMore
-        ? [{ step: 'runtime', updateOffset: updateOffset + runtimeLimit, updateLimit: runtimeLimit }]
+      : runtimeLimit && result.hasMore && nextUpdateCursor !== null
+        ? [{ step: 'runtime', updateCursor: nextUpdateCursor, updateLimit: runtimeLimit }]
         : firstSeedSteps(readBoundedMonitorLimit(opts.env));
     const queueStartedAt = diagnostics ? Date.now() : 0;
     const continuedCount = queueContinuations(opts.env, opts.ctx, nextSteps);
@@ -350,7 +352,8 @@ export async function runShardedPublicSnapshotContinuation(opts: {
       ...(result.skip ? { skipped: result.skip } : {}),
       ...(runtimeLimit
         ? {
-            updateOffset: result.updateOffset ?? updateOffset,
+            updateCursor,
+            nextUpdateCursor,
             updateLimit: result.updateLimit ?? runtimeLimit,
             rowCount: result.rowCount ?? 0,
             hasMore: result.hasMore ?? false,
@@ -501,8 +504,16 @@ export async function runShardedPublicSnapshotContinuation(opts: {
     publishArtifact: false,
   });
   const operationMs = diagnostics ? Date.now() - operationStartedAt : undefined;
+  // `publishArtifact: false` above means assemble never writes the artifact row, so the
+  // artifact step is the single writer. If assemble ever does publish it (flag change),
+  // skip the follow-up step instead of re-reading and touching the same row.
+  const artifactAlreadyPublished = result.artifactPublished === true;
   const nextStep: ShardedPublicSnapshotContinuationStep | null =
-    publishShardedSnapshots && result.ok && result.assembled && result.kind === 'homepage'
+    publishShardedSnapshots &&
+    result.ok &&
+    result.assembled &&
+    result.kind === 'homepage' &&
+    !artifactAlreadyPublished
       ? {
           step: 'artifact',
           kind: 'homepage',

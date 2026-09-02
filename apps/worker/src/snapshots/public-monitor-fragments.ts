@@ -17,7 +17,7 @@ import {
 } from '../schemas/public-status';
 import {
   readPublicSnapshotFragments,
-  readPublicSnapshotFragmentsPage,
+  readPublicSnapshotFragmentsAfterKey,
   type PublicSnapshotFragmentRow,
   type PublicSnapshotFragmentWrite,
 } from './public-fragments';
@@ -252,6 +252,7 @@ export type MonitorRuntimeUpdateFragmentReadResult = {
 export type MonitorRuntimeUpdateFragmentPageReadResult = MonitorRuntimeUpdateFragmentReadResult & {
   hasMore: boolean;
   rowCount: number;
+  lastFragmentKey: string | null;
 };
 
 function shouldSkipRuntimeUpdateFragmentByTime(
@@ -677,18 +678,21 @@ export async function readMonitorRuntimeUpdateFragments(
 
 export async function readMonitorRuntimeUpdateFragmentsPage(
   db: D1Database,
-  opts: MonitorRuntimeUpdateFragmentReadOptions & { offset: number; limit: number },
+  opts: MonitorRuntimeUpdateFragmentReadOptions & { afterFragmentKey?: string; limit: number },
 ): Promise<MonitorRuntimeUpdateFragmentPageReadResult> {
-  const readLimit = Math.max(1, Math.floor(opts.limit)) + 1;
-  const rows = await readPublicSnapshotFragmentsPage(db, MONITOR_RUNTIME_UPDATE_FRAGMENTS_KEY, {
-    offset: Math.max(0, Math.floor(opts.offset)),
-    limit: readLimit,
+  const pageSize = Math.max(1, Math.floor(opts.limit));
+  // Read one extra row to detect `hasMore` without a second query. Pages advance by
+  // the last key actually returned, so no row is read twice across pages.
+  const rows = await readPublicSnapshotFragmentsAfterKey(db, MONITOR_RUNTIME_UPDATE_FRAGMENTS_KEY, {
+    afterFragmentKey: opts.afterFragmentKey ?? '',
+    limit: pageSize + 1,
   });
-  const pageRows = rows.slice(0, Math.max(1, Math.floor(opts.limit)));
+  const pageRows = rows.slice(0, pageSize);
   const parsed = parseMonitorRuntimeUpdateFragmentRows(pageRows, opts);
   return {
     ...parsed,
     hasMore: rows.length > pageRows.length,
     rowCount: pageRows.length,
+    lastFragmentKey: pageRows[pageRows.length - 1]?.fragment_key ?? null,
   };
 }

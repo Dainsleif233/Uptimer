@@ -608,14 +608,15 @@ describe('internal sharded public snapshot continuation route', () => {
     ]);
   });
 
-  it('runs one paged runtime update step before queuing the next runtime page', async () => {
+  it('runs one keyset runtime update page before queuing the next runtime page', async () => {
     const selfRequests: Request[] = [];
+    const fragmentQueryArgs: unknown[][] = [];
     const env = {
       DB: createFakeD1Database([
         {
           match: 'from public_snapshot_fragments',
           all: (args) => {
-            expect(args).toEqual(['monitor-runtime:updates', 2, 0]);
+            fragmentQueryArgs.push(args);
             return [
               {
                 fragment_key: 'monitor:1',
@@ -660,6 +661,8 @@ describe('internal sharded public snapshot continuation route', () => {
     );
 
     expect(res.status).toBe(200);
+    // Keyset seek: empty start cursor, limit = page size + 1 for hasMore detection.
+    expect(fragmentQueryArgs).toEqual([['monitor-runtime:updates', '', 2]]);
     const body = await res.json();
     expect(body).toMatchObject({
       ok: true,
@@ -667,19 +670,63 @@ describe('internal sharded public snapshot continuation route', () => {
       refreshed: false,
       continued: true,
       monitor_count: 0,
-      update_offset: 0,
+      update_cursor: null,
+      next_update_cursor: 'monitor:1',
       update_limit: 1,
       row_count: 1,
       has_more: true,
       skipped: 'no_updates',
-      next_steps: [{ step: 'runtime', update_offset: 1, update_limit: 1 }],
+      next_steps: [{ step: 'runtime', update_cursor: 'monitor:1', update_limit: 1 }],
     });
     expect(waitUntil).toHaveBeenCalledTimes(1);
     await Promise.all(waitUntil.mock.calls.map((call) => call[0] as Promise<unknown>));
     await expect(selfRequests[0]!.json()).resolves.toEqual({
       step: 'runtime',
-      update_offset: 1,
+      update_cursor: 'monitor:1',
       update_limit: 1,
+    });
+  });
+
+  it('advances the runtime page cursor past rows already applied', async () => {
+    const fragmentQueryArgs: unknown[][] = [];
+    const env = {
+      DB: createFakeD1Database([
+        {
+          match: 'from public_snapshot_fragments',
+          all: (args) => {
+            fragmentQueryArgs.push(args);
+            return [];
+          },
+        },
+      ]),
+      ADMIN_TOKEN: 'test-admin-token',
+      UPTIMER_SCHEDULED_SHARDED_CONTINUATION: '1',
+      UPTIMER_SCHEDULED_RUNTIME_FRAGMENT_REFRESH: '1',
+      UPTIMER_SHARDED_RUNTIME_UPDATE_BATCH_SIZE: '2',
+    } as unknown as Env;
+
+    const res = await worker.fetch(
+      new Request('http://internal/api/v1/internal/continue/sharded-public-snapshot', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-admin-token',
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify({ step: 'runtime', update_cursor: 'monitor:7', update_limit: 2 }),
+      }),
+      env,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext,
+    );
+
+    expect(res.status).toBe(200);
+    expect(fragmentQueryArgs).toEqual([['monitor-runtime:updates', 'monitor:7', 3]]);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      step: 'runtime',
+      update_cursor: 'monitor:7',
+      next_update_cursor: null,
+      has_more: false,
+      row_count: 0,
     });
   });
 

@@ -23,7 +23,8 @@ export type InternalRuntimeFragmentsRefreshResult = {
   error?: boolean;
   hasMore?: boolean;
   rowCount?: number;
-  updateOffset?: number;
+  updateCursor?: string | null;
+  nextUpdateCursor?: string | null;
   updateLimit?: number;
 };
 
@@ -173,11 +174,11 @@ export async function refreshMonitorRuntimeSnapshotFromUpdateFragments(opts: {
 export async function refreshMonitorRuntimeSnapshotFromUpdateFragmentsPage(opts: {
   env: Env;
   now: number;
-  offset: number;
+  cursor?: string | null;
   limit: number;
   trace?: Trace | null;
 }): Promise<InternalRuntimeFragmentsRefreshResult> {
-  const updateOffset = Math.max(0, Math.floor(opts.offset));
+  const updateCursor = typeof opts.cursor === 'string' ? opts.cursor : null;
   const updateLimit = Math.max(1, Math.min(10, Math.floor(opts.limit)));
   const { maxAgeSeconds, minGeneratedAt, maxGeneratedAt } = readRuntimeFragmentTimeWindow(opts);
 
@@ -185,26 +186,19 @@ export async function refreshMonitorRuntimeSnapshotFromUpdateFragmentsPage(opts:
     opts.trace?.setLabel('route', 'internal/runtime-fragments-refresh-page');
     opts.trace?.setLabel('now', opts.now);
     opts.trace?.setLabel('fragment_max_age_s', maxAgeSeconds);
-    opts.trace?.setLabel('runtime_update_offset', updateOffset);
+    opts.trace?.setLabel('runtime_update_cursor', updateCursor ?? '-');
     opts.trace?.setLabel('runtime_update_limit', updateLimit);
 
+    const readPage = async () =>
+      await readMonitorRuntimeUpdateFragmentsPage(opts.env.DB, {
+        minGeneratedAt,
+        maxGeneratedAt,
+        ...(updateCursor !== null ? { afterFragmentKey: updateCursor } : {}),
+        limit: updateLimit,
+      });
     const fragmentRead = opts.trace
-      ? await opts.trace.timeAsync(
-          'runtime_fragments_page_read',
-          async () =>
-            await readMonitorRuntimeUpdateFragmentsPage(opts.env.DB, {
-              minGeneratedAt,
-              maxGeneratedAt,
-              offset: updateOffset,
-              limit: updateLimit,
-            }),
-        )
-      : await readMonitorRuntimeUpdateFragmentsPage(opts.env.DB, {
-          minGeneratedAt,
-          maxGeneratedAt,
-          offset: updateOffset,
-          limit: updateLimit,
-        });
+      ? await opts.trace.timeAsync('runtime_fragments_page_read', readPage)
+      : await readPage();
 
     opts.trace?.setLabel('runtime_update_fragment_count', fragmentRead.updates.length);
     opts.trace?.setLabel('runtime_update_fragment_invalid_count', fragmentRead.invalidCount);
@@ -222,7 +216,8 @@ export async function refreshMonitorRuntimeSnapshotFromUpdateFragmentsPage(opts:
         skip: 'no_updates',
         hasMore: fragmentRead.hasMore,
         rowCount: fragmentRead.rowCount,
-        updateOffset,
+        updateCursor,
+        nextUpdateCursor: fragmentRead.lastFragmentKey,
         updateLimit,
       };
     }
@@ -242,7 +237,8 @@ export async function refreshMonitorRuntimeSnapshotFromUpdateFragmentsPage(opts:
       staleCount: fragmentRead.staleCount,
       hasMore: fragmentRead.hasMore,
       rowCount: fragmentRead.rowCount,
-      updateOffset,
+      updateCursor,
+      nextUpdateCursor: fragmentRead.lastFragmentKey,
       updateLimit,
     };
   } catch (err) {
@@ -257,7 +253,8 @@ export async function refreshMonitorRuntimeSnapshotFromUpdateFragmentsPage(opts:
       error: true,
       hasMore: false,
       rowCount: 0,
-      updateOffset,
+      updateCursor,
+      nextUpdateCursor: null,
       updateLimit,
     };
   }

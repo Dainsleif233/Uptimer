@@ -1,3 +1,9 @@
+// The `generated_at` guard prevents stale overwrites. The `body_json` guard makes the
+// write a no-op when the fragment content is byte-identical and not newer, which is the
+// steady state for idle ticks: the pipeline re-seeds every fragment from an unchanged
+// snapshot each minute, and only `updated_at` would have moved. Fragment freshness is
+// decided by `generated_at` everywhere it is read, so skipping those writes is safe and
+// removes O(monitors) rows_written per idle tick.
 const UPSERT_FRAGMENT_SQL = `
   INSERT INTO public_snapshot_fragments (
     snapshot_key,
@@ -11,7 +17,11 @@ const UPSERT_FRAGMENT_SQL = `
     generated_at = excluded.generated_at,
     body_json = excluded.body_json,
     updated_at = excluded.updated_at
-  WHERE excluded.generated_at >= public_snapshot_fragments.generated_at
+  WHERE excluded.generated_at > public_snapshot_fragments.generated_at
+     OR (
+       excluded.generated_at = public_snapshot_fragments.generated_at
+       AND excluded.body_json <> public_snapshot_fragments.body_json
+     )
 `;
 
 const READ_FRAGMENTS_SQL = `
@@ -21,17 +31,21 @@ const READ_FRAGMENTS_SQL = `
   ORDER BY fragment_key
 `;
 
-const READ_FRAGMENTS_PAGE_SQL = `
+// Keyset pagination. `OFFSET` makes SQLite walk and discard every skipped row, so
+// paging N fragments in batches of R scanned ~N^2/(2R) rows per pass. Seeking on the
+// primary key `(snapshot_key, fragment_key)` reads only the rows returned.
+const READ_FRAGMENTS_AFTER_KEY_SQL = `
   SELECT fragment_key, generated_at, body_json, updated_at
   FROM public_snapshot_fragments
   WHERE snapshot_key = ?1
+    AND fragment_key > ?2
   ORDER BY fragment_key
-  LIMIT ?2 OFFSET ?3
+  LIMIT ?3
 `;
 
 const upsertFragmentStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 const readFragmentsStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
-const readFragmentsPageStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
+const readFragmentsAfterKeyStatementByDb = new WeakMap<D1Database, D1PreparedStatement>();
 
 export type PublicSnapshotFragmentWrite = {
   snapshotKey: string;
@@ -55,12 +69,6 @@ function assertFragmentText(value: string, label: string): void {
 }
 
 function assertFiniteTimestamp(value: number, label: string): void {
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
-    throw new Error(`public snapshot fragment ${label} must be a non-negative integer`);
-  }
-}
-
-function assertNonNegativeInteger(value: number, label: string): void {
   if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
     throw new Error(`public snapshot fragment ${label} must be a non-negative integer`);
   }
@@ -125,23 +133,22 @@ export async function readPublicSnapshotFragments(
   return results ?? [];
 }
 
-export async function readPublicSnapshotFragmentsPage(
+export async function readPublicSnapshotFragmentsAfterKey(
   db: D1Database,
   snapshotKey: string,
-  opts: { offset: number; limit: number },
+  opts: { afterFragmentKey: string; limit: number },
 ): Promise<PublicSnapshotFragmentRow[]> {
   assertFragmentText(snapshotKey, 'snapshotKey');
-  assertNonNegativeInteger(opts.offset, 'offset');
   assertPositiveInteger(opts.limit, 'limit');
 
-  const cached = readFragmentsPageStatementByDb.get(db);
-  const statement = cached ?? db.prepare(READ_FRAGMENTS_PAGE_SQL);
+  const cached = readFragmentsAfterKeyStatementByDb.get(db);
+  const statement = cached ?? db.prepare(READ_FRAGMENTS_AFTER_KEY_SQL);
   if (!cached) {
-    readFragmentsPageStatementByDb.set(db, statement);
+    readFragmentsAfterKeyStatementByDb.set(db, statement);
   }
 
   const { results } = await statement
-    .bind(snapshotKey, opts.limit, opts.offset)
+    .bind(snapshotKey, opts.afterFragmentKey, opts.limit)
     .all<PublicSnapshotFragmentRow>();
   return results ?? [];
 }
