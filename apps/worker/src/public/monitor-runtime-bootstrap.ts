@@ -1,4 +1,8 @@
-import { computeTodayPartialUptimeBatch, listHeartbeatsByMonitorId } from './data';
+import {
+  computeHeartbeatSinceCheckedAt,
+  computeTodayPartialUptimeBatch,
+  listHeartbeatsByMonitorId,
+} from './data';
 import {
   MONITOR_RUNTIME_HEARTBEAT_POINTS,
   MONITOR_RUNTIME_SNAPSHOT_VERSION,
@@ -56,9 +60,17 @@ export async function rebuildPublicMonitorRuntimeSnapshot(
 
   const rows = results ?? [];
   const monitorIds = rows.map((row) => row.id);
+  const maxIntervalSec = rows.reduce((max, row) => Math.max(max, row.interval_sec), 1);
+  const heartbeatSinceCheckedAt = computeHeartbeatSinceCheckedAt(
+    now,
+    maxIntervalSec,
+    MONITOR_RUNTIME_HEARTBEAT_POINTS,
+  );
   const [heartbeatsByMonitorId, todayByMonitorId] = await Promise.all([
     monitorIds.length > 0
-      ? listHeartbeatsByMonitorId(db, monitorIds, MONITOR_RUNTIME_HEARTBEAT_POINTS)
+      ? listHeartbeatsByMonitorId(db, monitorIds, MONITOR_RUNTIME_HEARTBEAT_POINTS, {
+          sinceCheckedAt: heartbeatSinceCheckedAt,
+        })
       : Promise.resolve(new Map()),
     rows.length > 0
       ? computeTodayPartialUptimeBatch(
@@ -87,7 +99,7 @@ export async function rebuildPublicMonitorRuntimeSnapshot(
         today.total_sec > 0
           ? Math.max(0, now - today.total_sec)
           : row.created_at >= dayStart
-            ? latestHeartbeat?.checked_at ?? null
+            ? (latestHeartbeat?.checked_at ?? null)
             : dayStart;
 
       return {

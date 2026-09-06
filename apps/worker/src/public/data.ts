@@ -127,6 +127,11 @@ export const STATUS_UPCOMING_MAINTENANCE_LIMIT = 5;
 
 const UPTIME_DAYS = 60;
 const HEARTBEAT_POINTS = 60;
+// Multiplier applied to (points * maxIntervalSec) when deriving the heartbeat
+// scan lower bound. It guarantees the time window contains at least `points` rows
+// for the slowest monitor, so the top-`points` ROW_NUMBER result is identical to an
+// unbounded scan while bounding rows_read.
+const HEARTBEAT_SCAN_SAFETY_FACTOR = 2;
 const D1_MAX_SQL_VARIABLES = 100;
 const TODAY_PARTIAL_UPTIME_FIXED_BINDINGS = 2;
 const TODAY_PARTIAL_UPTIME_BINDINGS_PER_MONITOR = 4;
@@ -332,10 +337,31 @@ export function maintenanceWindowRowToApi(row: MaintenanceWindowRow, monitorIds:
   } satisfies PublicStatusResponse['maintenance_windows']['active'][number];
 }
 
+/**
+ * Lower bound for `listHeartbeatsByMonitorId` so the ROW_NUMBER full scan is
+ * bounded to the most recent window instead of the entire retention period.
+ *
+ * Derived from the largest `interval_sec` among the queried monitors: the
+ * slowest monitor emits one row per `maxIntervalSec`, so a window of
+ * `points * maxIntervalSec * HEARTBEAT_SCAN_SAFETY_FACTOR` plus one interval of
+ * grace always spans at least `points` rows. The index
+ * `idx_check_results_monitor_time(monitor_id, checked_at)` turns the bound
+ * into an index seek rather than a retention-wide scan.
+ */
+export function computeHeartbeatSinceCheckedAt(
+  now: number,
+  maxIntervalSec: number,
+  points: number,
+): number {
+  const safeInterval = Number.isFinite(maxIntervalSec) && maxIntervalSec > 0 ? maxIntervalSec : 1;
+  return now - points * safeInterval * HEARTBEAT_SCAN_SAFETY_FACTOR - safeInterval;
+}
+
 export async function listHeartbeatsByMonitorId(
   db: D1Database,
   monitorIds: number[],
   limitPerMonitor: number,
+  opts?: { sinceCheckedAt?: number },
 ): Promise<Map<number, PublicStatusResponse['monitors'][number]['heartbeats']>> {
   const byMonitor = new Map<number, PublicStatusResponse['monitors'][number]['heartbeats']>();
 
@@ -343,6 +369,12 @@ export async function listHeartbeatsByMonitorId(
   if (ids.length === 0) return byMonitor;
 
   const placeholders = ids.map((_, idx) => `?${idx + 2}`).join(', ');
+  // Always include the time lower bound; callers that do not pass a bound
+  // default to 0, which is a no-op filter (checked_at >= 0) that preserves the
+  // pre-existing unbounded behavior. Keeping the clause unconditional avoids
+  // binding a parameter index the statement does not reference (SQLITE_RANGE).
+  const sinceCheckedAt = opts?.sinceCheckedAt ?? 0;
+  const sinceClause = ` AND checked_at >= ?${ids.length + 2}`;
   const sql = `
     SELECT monitor_id, checked_at, status, latency_ms
     FROM (
@@ -357,7 +389,7 @@ export async function listHeartbeatsByMonitorId(
           ORDER BY checked_at DESC, id DESC
         ) AS rn
       FROM check_results
-      WHERE monitor_id IN (${placeholders})
+      WHERE monitor_id IN (${placeholders})${sinceClause}
     )
     WHERE rn <= ?1
     ORDER BY monitor_id, checked_at DESC, id DESC
@@ -365,7 +397,7 @@ export async function listHeartbeatsByMonitorId(
 
   const { results } = await db
     .prepare(sql)
-    .bind(limitPerMonitor, ...ids)
+    .bind(limitPerMonitor, ...ids, sinceCheckedAt)
     .all<HeartbeatRow>();
   for (const r of results ?? []) {
     appendMapValue(byMonitor, r.monitor_id, {
@@ -754,15 +786,13 @@ async function computeTodayPartialUptimeBatchSql(
       args.push(monitor.id, monitor.interval_sec, monitor.created_at, monitor.last_checked_at);
     }
 
-    const { results } = await stmt
-      .bind(...args)
-      .all<{
-        monitor_id: number;
-        start_at: number;
-        total_sec: number;
-        downtime_sec: number;
-        unknown_sec: number;
-      }>();
+    const { results } = await stmt.bind(...args).all<{
+      monitor_id: number;
+      start_at: number;
+      total_sec: number;
+      downtime_sec: number;
+      unknown_sec: number;
+    }>();
 
     const rows = results ?? [];
     const shouldReturnAtLeastOneRow = chunk.some(
@@ -1128,6 +1158,15 @@ export async function buildPublicMonitorCards(
           )
       : Promise.resolve(new Map<number, UptimeWindowTotals>());
 
+    const heartbeatMaxIntervalSec = rawMonitors.reduce(
+      (max, m) => Math.max(max, m.interval_sec),
+      1,
+    );
+    const heartbeatSinceCheckedAt = computeHeartbeatSinceCheckedAt(
+      now,
+      heartbeatMaxIntervalSec,
+      HEARTBEAT_POINTS,
+    );
     const [heartbeatsByMonitorId, rollupRows, todayByMonitorId] = await Promise.all([
       runtimeById
         ? Promise.resolve(
@@ -1137,7 +1176,9 @@ export async function buildPublicMonitorCards(
               >,
             ),
           )
-        : listHeartbeatsByMonitorId(db, ids, HEARTBEAT_POINTS),
+        : listHeartbeatsByMonitorId(db, ids, HEARTBEAT_POINTS, {
+            sinceCheckedAt: heartbeatSinceCheckedAt,
+          }),
       rollupsPromise,
       todayByMonitorIdPromise,
     ]);
@@ -1315,9 +1356,8 @@ export async function listVisibleMaintenanceWindows(
   upcoming: FilteredMaintenanceWindowEntry[];
   activeMonitorIds: ReadonlySet<number>;
 }> {
-  const maintenanceVisibilitySql = maintenanceWindowStatusPageVisibilityPredicate(
-    includeHiddenMonitors,
-  );
+  const maintenanceVisibilitySql =
+    maintenanceWindowStatusPageVisibilityPredicate(includeHiddenMonitors);
 
   const [{ results: activeResults }, { results: upcomingResults }] = await Promise.all([
     db
@@ -1366,7 +1406,10 @@ export async function listVisibleMaintenanceWindows(
     ? new Set<number>()
     : await listStatusPageVisibleMonitorIds(
         db,
-        [...activeWindowMonitorIdsByWindowId.values(), ...upcomingWindowMonitorIdsByWindowId.values()].flat(),
+        [
+          ...activeWindowMonitorIdsByWindowId.values(),
+          ...upcomingWindowMonitorIdsByWindowId.values(),
+        ].flat(),
       );
 
   const active = activeRows
@@ -1448,10 +1491,7 @@ export async function listVisibleMaintenanceWindows(
   return { active, upcoming, activeMonitorIds };
 }
 
-export async function readPublicSiteSettings(
-  db: D1Database,
-  opts?: { bypassCache?: boolean },
-) {
+export async function readPublicSiteSettings(db: D1Database, opts?: { bypassCache?: boolean }) {
   return readSettings(db, opts);
 }
 
