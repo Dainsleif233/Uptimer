@@ -2053,10 +2053,12 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
                   ? { onPersistedMonitor: inlineNotificationHandler }
                   : {}),
               });
-              if (activeRuntimeFragmentPipeline) {
-                requiresRuntimeSnapshotRebuild = true;
-                requiresFullHomepageRefresh = true;
-              } else if (fallbackBatch.stats.processedCount === 0 && ids.length > 0) {
+                if (activeRuntimeFragmentPipeline) {
+                  // The inline incremental refresh below (runtimeUpdates) already
+                  // applies these monitors' results, so a full rebuild (which scans
+                  // check_results) is unnecessary here and only multiplies read cost.
+                  requiresFullHomepageRefresh = true;
+                } else if (fallbackBatch.stats.processedCount === 0 && ids.length > 0) {
                 requiresRuntimeSnapshotRebuild = true;
                 requiresFullHomepageRefresh = true;
               }
@@ -2081,9 +2083,10 @@ export async function runScheduledTick(env: Env, ctx: ExecutionContext): Promise
           runtimeUpdates = [];
           runtimeSnapshotDurMs = performance.now() - runtimeFragmentWriteStart;
         } catch (err) {
-          console.warn('runtime update fragments write: service write failed', err);
-          requiresRuntimeSnapshotRebuild = true;
-          requiresFullHomepageRefresh = true;
+            console.warn('runtime update fragments write: service write failed', err);
+            // Incremental refresh still runs below with the captured runtimeUpdates,
+            // so skip the full rebuild (expensive check_results scan).
+            requiresFullHomepageRefresh = true;
         }
       }
     } else {

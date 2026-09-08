@@ -16,7 +16,8 @@
 2. **读取建议 #1（`listHeartbeatsByMonitorId` 无界全扫，原估占读取 ~80%）= 已实施（P0）。**
    已为该函数增加 `sinceCheckedAt` 时间下界（由调用方按本批 monitor 的最大 `interval_sec` 推导），依赖已有索引 `idx_check_results_monitor_time(monitor_id, checked_at)` 将 `ROW_NUMBER` 全扫转为索引 seek。调用方 `rebuildPublicMonitorRuntimeSnapshot` 与 `buildPublicMonitorCards` 均已传入下界。无 schema 变更。
 
-**结论**：文档原始的"写入 24× / 读取 6×"中，写入大户（锁，50%）已消除；剩余真实瓶颈是读取侧 `listHeartbeatsByMonitorId` 那次无界扫描——现已修复。写入侧的进一步下降只能靠降低 `T`（监控频率 / 保留期），见第七节。
+**结论**：文档原始的"写入 24× / 读取 6×"中，写入大户（锁，50%）已消除；读取侧 listHeartbeatsByMonitorId 的无界扫描（原占读 ~80%）也已修复（P0）。在此之上，**Phase 2（见第八节）又消除了一类读放大源——runtime 快照的全量 
+ebuild / 公开页回退扫 check_results**，使读取在 60s 频率、不降检测数量与频率的前提下可稳进 5M。但**写入仍是硬墙**：免费档 100K/天与 T≈610K 次/天在数学上不兼容（INSERT 与 retention DELETE 都按行计费，日流入/流出≈T），纯改 SQL 进不了 100K；要么升级付费档（25M/5M，当前 ~1.4M 直接达标），要么把"每次探测"的写入移出 D1（Durable Object / KV 缓冲 + 周期性聚合落盘），见第八节。
 
 ## 一、实测数据 vs 限制
 
@@ -189,3 +190,45 @@
 - **读取（不做 P0）**：约 **4.3×**（31M → ~7.6M），仍约 1.5× 超限。
 - **读取（结合 P0）**：约 **11×**（31M → ~2.8M），**低于 5M 上限 ✓**。
 - **关键洞察**：P0 修的是 `listHeartbeats` 那块无界扫描；5min 修的是"按天/每次探测量"那块（computeToday、listPending、rollup）。两者各自单独做都只能把读取压到 ~7M（仍略超），**要让读取稳稳进限，必须 P0 + 5min 一起做**。写入进限只靠 5min 也还差一节（2.9×），需更长 interval 或收紧保留期。
+---
+
+## 八、Phase 2：读侧收口（已实施，不动 schema）
+
+> 目标：在不降低检测数量（M）与频率（T=60s）的前提下，把读取压进 5M/天。
+> 状态：代码已改，`pnpm exec tsc` 通过，worker 全部 451 测试通过。
+
+### 8.1 根因（代码实证）
+
+第七节测算 "60s + P0" 读取 ≈7.3M，仍 1.5× 超限。P0 只修了 `listHeartbeats` 那次无界扫描；剩余大头是 **runtime 快照的全量 `rebuild`** 与**公开页回退扫 `check_results`**：
+
+- `rebuildPublicMonitorRuntimeSnapshot`（`monitor-runtime-bootstrap.ts`）每次都扫全 monitor + 跑 `computeTodayPartialUptimeBatch`（扫当天 `check_results`，~1,440·M 行/次）。
+- 公开页读路径 `data.ts:1111-1159`：仅当 runtime 快照覆盖请求 id 时才用 `materializeMonitorRuntimeTotals`（0 行 `check_results` 扫描）；一旦快照缺失/过期/覆盖不全，就回退到 `computeTodayPartialUptimeBatch` + `listHeartbeats` 全扫。
+- 增量刷新 `refreshPublicMonitorRuntimeSnapshot`（`monitor-runtime.ts:1464`）本不扫 `check_results`，只在 `shouldRebuild`（缺失/跨天/**未来时间戳**/历史 monitor 缺失）时全量重建。
+
+两个会**反复触发 rebuild** 的放大源：
+
+1. **跨 colo 时钟偏移**：原 `stored.generatedAt > opts.now`（`monitor-runtime.ts:1477`）触发重建，但读路径 `readPublicMonitorRuntimeSnapshot`（`:1050`）以 `> now + 60s` 才判未来——两者不一致，导致读路径肯接受的快照在刷新时被强制全量重建，可能反复震荡。
+2. **瞬态失败强制重建**：`scheduled.ts` 在 service batch 失败（`:2057`）、runtime-fragment 写出失败（`:2085`）时置 `requiresRuntimeSnapshotRebuild=true`，强制全量扫 `check_results`；但下游增量刷新（`:2116`）本就会用已捕获的 `runtimeUpdates` 增量更新快照，全量重建是多余的读放大。文档原担心的"rebuild 一天跑 4–6 次"即源于此类。
+
+### 8.2 改动
+
+1. **对齐未来时间戳容忍**：`monitor-runtime.ts` 重建判断改用 `opts.now + FUTURE_SNAPSHOT_TOLERANCE_SECONDS`（与读路径一致），≤60s 的轻微时钟偏移不再触发全量重建。（无 schema 变更。）
+2. **瞬态失败不再强制全量重建**：`scheduled.ts` 上述两处仅保留 `requiresFullHomepageRefresh=true`，移除 `requiresRuntimeSnapshotRebuild=true`；增量刷新仍按 `runtimeUpdates` 更新快照。保留 `processedCount===0` 的安全网分支不变。（无 schema 变更。）
+3. **重建原因埋点**：`refreshPublicMonitorRuntimeSnapshot` 在每次真正重建时 `console.info('runtime_snapshot_rebuild', { reason, ... })`，reason ∈ {missing, day_rollover, generated_before_day, future_dated, missing_historical_entry}。用于确认文档"待确认事实"中的实际重建频率（grep 该日志即可核对）。
+
+### 8.3 预期效果
+
+- 重建收口到"仅跨天 + 真正缺失/损坏"，从 ~4–6×/天 → ~1×/天。
+- `computeTodayPartialUptimeBatch` 由 ~3.7M/天（按 6× 估算）降到 ~0.6M/天（1×）。
+- 读取合计：7.3M − 3.1M（computeToday）≈ **~3.5–4M < 5M ✓**（listDueMonitors 1.2M、listPending 1.2M 为 60s 频率下必要的 O(M/分钟)/O(batch) 成本，索引无法缩减——见 8.4）。
+
+### 8.4 更正（原文档误判）
+
+原文档认为给"到期 monitor 扫描"加索引能省读。但 **60s 频率下每个 monitor 每分钟都到期**，无论全扫还是索引 seek 每分钟都要触碰 ≈M 行，扫描量不变（`LIST_DUE_MONITORS_SQL` 用 `s.last_checked_at <= ?1 - m.interval_sec`，无 `monitor_state(last_checked_at)` 索引也罢，结果都是 O(M/分钟) 必要成本）。该索引仅在 interval > 60s 时有用——与"不降频率"前提冲突，故**不是优先项**。真正把读压进限的是 8.2 的"消灭回退扫 + 重建收口"，而非索引。
+
+### 8.5 写侧硬墙（本节未触及，仍需决策）
+
+读稳了，但写仍 ~1.4M（14× 超 100K）。数学上免费档 100K/天 与 T≈610K 不兼容：每次探测最终要 INSERT 或日后被 retention DELETE（上限 200K/天），两者都按行计费，日流入/流出≈T。纯改 SQL / 批处理 / 索引 / 缩短保留期都进不了 100K。两条路：
+
+- **升级付费 D1（25M 读 / 5M 写）**：当前 7.3M 读、1.4M 写全部在付费档内，一步达标，最具性价比。
+- **架构改造（唯一能进 100K 的工程手段）**：用 Durable Object（每 monitor 或分片）作热存储/写缓冲，探测结果先写 DO（不计入 D1 行限额），低频把聚合行（按桶 up/down 计数 + 延迟 min/avg/max/p95 + 样本数）flush 到 D1；`monitor_state` 仅状态翻转时写；retention 因 D1 不再存逐条 `check_results` 而≈0。D1 写入降到 ~M×桶数/天（几百~几千）。或折中：KV 存原始探测 + 只把 rollup 写 D1。

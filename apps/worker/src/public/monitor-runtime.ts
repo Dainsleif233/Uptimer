@@ -1468,20 +1468,47 @@ export async function refreshPublicMonitorRuntimeSnapshot(opts: {
   rebuild: () => Promise<PublicMonitorRuntimeSnapshot>;
   beforeWrite?: () => void | Promise<void>;
 }): Promise<PublicMonitorRuntimeSnapshot> {
-  const stored = await readStoredMonitorRuntimeSnapshot(opts.db);
-  const dayStart = utcDayStart(opts.now);
-  const shouldRebuild =
-    stored === null ||
-    stored.snapshot.day_start_at !== dayStart ||
-    stored.generatedAt < dayStart ||
-    stored.generatedAt > opts.now;
+    const stored = await readStoredMonitorRuntimeSnapshot(opts.db);
+    if (stored === null) {
+      console.info('runtime_snapshot_rebuild', {
+        reason: 'missing',
+        generated_at: null,
+        now: opts.now,
+        day_start_at: utcDayStart(opts.now),
+      });
+      const rebuilt = await opts.rebuild();
+      await opts.beforeWrite?.();
+      await writePublicMonitorRuntimeSnapshot(opts.db, rebuilt, opts.now);
+      return rebuilt;
+    }
 
-  if (shouldRebuild) {
-    const rebuilt = await opts.rebuild();
-    await opts.beforeWrite?.();
-    await writePublicMonitorRuntimeSnapshot(opts.db, rebuilt, opts.now);
-    return rebuilt;
-  }
+    const dayStart = utcDayStart(opts.now);
+    // Align the rebuild trigger with the read path's future-date tolerance
+    // (FUTURE_SNAPSHOT_TOLERANCE_SECONDS). A snapshot that readPublicMonitorRuntimeSnapshot
+    // would happily accept must not force a full check_results scan here — otherwise a
+    // small cross-colo clock skew makes every refresh rebuild from scratch.
+    const futureCutoff = opts.now + FUTURE_SNAPSHOT_TOLERANCE_SECONDS;
+    const rebuildReason =
+      stored.snapshot.day_start_at !== dayStart
+        ? 'day_rollover'
+        : stored.generatedAt < dayStart
+          ? 'generated_before_day'
+          : stored.generatedAt > futureCutoff
+            ? 'future_dated'
+            : null;
+
+    if (rebuildReason !== null) {
+      console.info('runtime_snapshot_rebuild', {
+        reason: rebuildReason,
+        generated_at: stored.generatedAt,
+        now: opts.now,
+        day_start_at: dayStart,
+      });
+      const rebuilt = await opts.rebuild();
+      await opts.beforeWrite?.();
+      await writePublicMonitorRuntimeSnapshot(opts.db, rebuilt, opts.now);
+      return rebuilt;
+    }
 
   const snapshot = stored.snapshot;
   const snapshotMonitorIds = readSnapshotMonitorIds(snapshot);
@@ -1492,6 +1519,11 @@ export async function refreshPublicMonitorRuntimeSnapshot(opts: {
       update.checked_at >= dayStart + update.interval_sec,
   );
   if (missingHistoricalEntry) {
+    console.info('runtime_snapshot_rebuild', {
+      reason: 'missing_historical_entry',
+      now: opts.now,
+      day_start_at: dayStart,
+    });
     const rebuilt = await opts.rebuild();
     await opts.beforeWrite?.();
     await writePublicMonitorRuntimeSnapshot(opts.db, rebuilt, opts.now);
