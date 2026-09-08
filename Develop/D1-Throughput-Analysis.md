@@ -232,3 +232,38 @@ ebuild / 公开页回退扫 check_results**，使读取在 60s 频率、不降�
 
 - **升级付费 D1（25M 读 / 5M 写）**：当前 7.3M 读、1.4M 写全部在付费档内，一步达标，最具性价比。
 - **架构改造（唯一能进 100K 的工程手段）**：用 Durable Object（每 monitor 或分片）作热存储/写缓冲，探测结果先写 DO（不计入 D1 行限额），低频把聚合行（按桶 up/down 计数 + 延迟 min/avg/max/p95 + 样本数）flush 到 D1；`monitor_state` 仅状态翻转时写；retention 因 D1 不再存逐条 `check_results` 而≈0。D1 写入降到 ~M×桶数/天（几百~几千）。或折中：KV 存原始探测 + 只把 rollup 写 D1。
+---
+
+## 九、写侧 Phase 3：把逐条探测移出 D1（架构改造，进行中）
+
+> 目标：把 D1 写入从 ~1.4M/天 压到免费档 100K/天 以内，且不降检测数量（M）与频率（T=60s）。
+> 状态：脚手架已落地（迁移 0016 + `check-rollups.ts` + 单测）；尚未接入写路径（接入前需先迁移读路径）。
+
+### 9.1 硬约束（重申）
+
+免费档 100K 写/天 与 T≈610K 次/天 在数学上不兼容：每次探测最终要 INSERT 或日后被 retention DELETE，两者都按行计费，日流入/流出≈T。纯改 SQL / 批处理 / 索引 / 缩短保留期都进不了 100K。当前写构成 ≈ `check_results` INSERT(T) + `monitor_state` UPSERT(T) + retention DELETE(≤200K) + 小量 ≈ 1.4M。
+
+### 9.2 已落地脚手架
+
+- 迁移 `0016_check_rollups.sql`：新增 `check_rollups(monitor_id, bucket_start, bucket_sec, total, up, down, unknown, latency_sum/min/max, last_*)` + 索引。`bucket_sec` 固定（默认 300s=5min，`UPTIMER_CHECK_ROLLUP_BUCKET_SECONDS` 可调），60s monitor 下 ≈5 查/行，等价的 `check_results` 写入降约 5×。
+- `apps/worker/src/scheduler/check-rollups.ts`：`bucketStartFor` / `readCheckRollupBucketSeconds` / `toCheckRollupBindings`（纯函数，已单测）/ `getUpsertCheckRollupStatement`（按行数缓存、null 安全的 latency min/max 累加，模式同现有 `getInsertCheckResultStatement`）。
+- 单测 `test/check-rollups.test.ts` 通过；`tsc` 与全套 455 测试通过。
+
+### 9.3 真正削减写入所需的迁移步骤（按序）
+
+1. **迁移全部 `check_results` 读路径到 `check_rollups`/`runtime` 快照**（否则停写 `check_results` 会破坏功能）。涉及 ~15 处 SQL：`data.ts` 的 `listHeartbeatsByMonitorId`（L391）与 `computeTodayPartialUptimeBatch`（L628/680/918）、`homepage.ts`(L964)、`public.ts`(L549/618/1609)、`public-ui.ts`(L522/574/722/846/1427/1452/1504/1623/1675)、`admin-analytics.ts`(L307/452)、`admin-exports.ts`(L127)、`daily-rollup.ts`(L135)。心跳 sparkline 已由 runtime 快照提供，无需 `check_results`。
+2. **翻转 `persistCompletedMonitors`**：在 feature flag（默认 off，待读路径全迁完再开）下用 `check_rollups` UPSERT 替换 `check_results` INSERT。
+3. **停止写原始 `check_results`**，retention 只清理小得多的 `check_rollups`（DELETE 量也按桶计，随聚合同步下降）。
+
+完成 9.3 后，写入 ≈ `check_rollups` UPSERT( T/5 ) + `monitor_state` UPSERT(T) + retention( T/5 ) ≈ **850K/天**——仍约 8.5× 超 100K。聚合把"探测结果"搬离了 D1，但 **`monitor_state` 每查必写（调度用的 `last_checked_at`）仍在 610K**，这是下一个且是最后一个瓶颈。
+
+### 9.4 仍须决策：能否进 100K（W2）
+
+要真正进 100K，必须消除 `monitor_state` 的每查写入——即把**调度游标（`last_checked_at`/`next_check_at`）+ 运行时状态**移出 D1：
+
+- **Durable Object 方案（推荐）**：每 monitor 或分片一个 DO 作热存储/写缓冲，探测结果先写 DO（不计入 D1 行限额），低频把聚合桶 flush 到 `check_rollups`；`monitor_state` 仅在状态翻转时写 D1；`listDueMonitors` 改为从 DO/分片调度状态取"到期"集。retention 因 D1 不再存逐条探测而≈0。D1 写入降到 ~M×桶数/天（几百~几千），稳进 100K。
+- **折中**：KV 存原始探测 + 只把 rollup 写 D1（KV 按操作计费、无行限额，最终一致，对 uptime 聚合可接受）。
+
+### 9.5 备选：升级付费 D1（25M 读 / 5M 写）
+
+当前优化后 7.3M 读、1.4M 写 全部在付费档内，一步达标，最具性价比。若目标不是"必须免费"而是"控成本/留余地"，优先走这条；9.3/9.4 是按"必须留免费档"才需要做的工程。
