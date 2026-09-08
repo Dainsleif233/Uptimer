@@ -1,11 +1,26 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  CHECK_ROLLUP_BINDINGS_PER_ROW,
   bucketStartFor,
+  getUpsertCheckRollupStatement,
   readCheckRollupBucketSeconds,
   toCheckRollupBindings,
 } from '../src/scheduler/check-rollups';
 import type { CompletedDueMonitor } from '../src/scheduler/scheduled';
+
+/** Minimal D1 mock: only prepare() is exercised by getUpsertCheckRollupStatement. */
+function makeFakeDb() {
+  const prepared: { sql: string }[] = [];
+  const db = {
+    prepare(sql: string) {
+      const stmt = { sql, bind: () => stmt, run: () => Promise.resolve({}) };
+      prepared.push(stmt);
+      return stmt;
+    },
+  } as unknown as D1Database;
+  return { db, prepared };
+}
 
 function makeCompleted(id: number, checkedAt: number, status: string, latencyMs: number | null) {
   return {
@@ -60,5 +75,38 @@ describe('scheduler/check-rollups', () => {
     // First check -> bucket 0, second -> bucket 300.
     expect(bindings[1]).toBe(0);
     expect(bindings[14]).toBe(300);
+  });
+
+  describe('getUpsertCheckRollupStatement', () => {
+    it('builds a null-safe UPSERT with numbered placeholders matching rowCount * 13', () => {
+      const { db, prepared } = makeFakeDb();
+      const rowCount = 2;
+      const stmt = getUpsertCheckRollupStatement(db, rowCount);
+      expect(stmt).toBeDefined();
+      expect(prepared).toHaveLength(1);
+      const sql = prepared[0]?.sql ?? '';
+      expect(sql).toContain('ON CONFLICT(monitor_id, bucket_start)');
+      // Null-safe min/max: a null-latency batch must not clobber existing stats.
+      expect(sql).toContain('latency_min = CASE');
+      expect(sql).toContain('latency_max = CASE');
+      expect(sql).toContain('WHEN excluded.latency_min IS NULL THEN latency_min');
+      expect(sql).toContain('WHEN excluded.latency_max IS NULL THEN latency_max');
+      const placeholders = [...sql.matchAll(/\?(\d+)/g)].map((m) => Number(m[1]));
+      expect(placeholders).toEqual(
+        Array.from({ length: rowCount * CHECK_ROLLUP_BINDINGS_PER_ROW }, (_, i) => i + 1),
+      );
+    });
+
+    it('caches the prepared statement per (db, rowCount)', () => {
+      const { db: dbA } = makeFakeDb();
+      const { db: dbB } = makeFakeDb();
+      const a1 = getUpsertCheckRollupStatement(dbA, 3);
+      const a2 = getUpsertCheckRollupStatement(dbA, 3);
+      const aOther = getUpsertCheckRollupStatement(dbA, 4);
+      const b1 = getUpsertCheckRollupStatement(dbB, 3);
+      expect(a2).toBe(a1); // same db + rowCount -> cached statement
+      expect(aOther).not.toBe(a1); // different rowCount -> fresh statement
+      expect(b1).not.toBe(a1); // different db -> separate cache
+    });
   });
 });
