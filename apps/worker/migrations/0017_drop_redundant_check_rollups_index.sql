@@ -8,7 +8,8 @@
 -- so dropping the duplicate directly serves the goal of this migration series
 -- (minimizing D1 rows_written).
 --
--- Safe for both states: if 0016 was applied, this drops the redundant index;
--- on a fresh apply it is a no-op.
+-- Safe for both states: `IF EXISTS` makes this a no-op on a fresh apply (the
+-- index is absent) and drops the redundant index when 0016 was previously applied.
+-- NOTE: SQLite/D1 `DROP INDEX` only supports `IF EXISTS`, not `IF NOT EXISTS`.
 
-DROP INDEX IF NOT EXISTS idx_check_rollups_monitor_time;
+DROP INDEX IF EXISTS idx_check_rollups_monitor_time;
